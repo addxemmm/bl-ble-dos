@@ -11,13 +11,14 @@
 
 面向 Ubuntu / Kali 的 BR/EDR 与 Bluetooth LE 有界负载和可用性观察工具。一个 Bash 入口、一个 Rich 终端向导，使用常见 USB 双模蓝牙适配器发起正常协议交互，同时保存本机 HCI 流量；可另接已刷入 sniffer 固件的 nRF52840，补充 BLE 空口观察。
 
-> **开发预览，0.1.0 尚未发布。** 徽章仅描述项目定位，不表示 CI、硬件兼容或认证结果。合成 demo 与真实硬件运行严格区分；尚无已验证的适配器/被测设备兼容性结论。Kali 实机验证状态以可复核的测试记录为准。
+> **开发预览，0.2.0 尚未发布。** 徽章仅描述项目定位，不表示 CI、硬件兼容或认证结果。合成 demo 与真实硬件运行严格区分；尚无已验证的适配器/被测设备兼容性结论。Kali 实机验证状态以可复核的测试记录为准。
 
 ![Rich 终端界面合成预览：非实测结果](docs/assets/terminal-demo.svg)
 
 ## 为什么使用它
 
-- **终端里完成流程**：环境检查 → 适配器/目标选择 → 计划确认 → 采集 → 运行 → 报告。
+- **六步可回退向导**：环境 → 用例与适配器 → 目标 → 参数 → 证据 → 复核；可返回、分区修改和查看 JSON，不必从头填写。
+- **显式扫描选目标**：限时扫描、冻结候选表、编号选择，支持重扫、筛选和翻页；也可手动输入或保留当前目标，不会因进入页面自动连接或测试。
 - **有界而非无限发送**：默认每秒 1 次请求；速率、持续时间、操作数和连接循环均设硬上限。
 - **采集先于负载**：supervisor 等待 `btmon` 就绪后才启动 worker；关键采集失败会终止运行。
 - **结论不越过证据**：本机请求成功不等于业务正常；缺少业务探针、ECU 观察或空口数据时明确记录缺口。
@@ -60,6 +61,7 @@ chmod +x bt-dos scripts/install.sh
 ./bt-dos adapters                # 适配器枚举
 ./bt-dos scan --transport le --adapter hci0 --seconds 5
 ./bt-dos scan --transport bredr --adapter hci0 --seconds 5
+./bt-dos scan --transport le --adapter hci0 --seconds 5 --json
 ./bt-dos ble-info --target TARGET --adapter hci0
 ./bt-dos run --plan PLAN.json --confirm TARGET
 ./bt-dos report RUN_DIR
@@ -68,6 +70,20 @@ chmod +x bt-dos scripts/install.sh
 ```
 
 `TARGET`、`PLAN.json`、`RUN_DIR` 是占位符。实测目标须与计划及 `--confirm` 一致；BR/EDR 场景还需记录实际本地适配器地址。扫描与 `ble-info` 也会触发蓝牙通信，不属于离线演示。
+
+### 0.2.0 的目标选择
+
+向导目标页使用 `s` 扫描（默认 5 秒）、`m` 手动输入、`k` 保留当前目标。候选列表显示名称、完整 MAC、RSSI，宽屏额外显示配对状态及地址类型；`r` 每次只重扫一次，`f` 筛选，`t` 仅设置下次扫描为 1–15 秒，按 `r` 才重扫，`n` / `p` 翻页。列表中 `b` 返回选择方式，方式页 `b` 返回上一步；`q` 回首页，草稿仅保留于当前会话内存。首页演示或诊断完成后回到菜单。
+
+默认、快速预检和自定义预算均沿用现有协议上限。变更适配器或传输会同时清除旧目标与特征；任何目标变化都会清除旧 GATT 特征，再选 `ble-read` 时须重新填写。最终复核可直接修改分区，或按 `j` 查看 JSON。
+
+![扫描候选界面合成预览：非实测设备列表](docs/assets/scan-preview.svg)
+
+CLI `scan` 默认输出人读表格；脚本应使用 `--json` 获取含 `devices`、`status`、`cleanup_status`、`warnings` 的 `ScanResult`，这与 0.1 的默认输出不同。由于 BlueZ 多客户端发现过滤器合并，所有候选的 `transport_verified` 均为 `false`：只表示“在本次 LE / BR/EDR 扫描窗口观察到”，不是承载或目标身份证明。缓存未更新的设备不冒充本窗口新观察，空列表也不等于周围没有设备。
+
+取消扫描会返回 `status: interrupted`，保留 `cleanup_status` 与 `warnings`，CLI 退出 `130`；清理状态 `unconfirmed` 不是普通成功。
+
+扫描只在明确选择后启动，不调用 Connect / Pair、GATT 读写或测试负载；发现过程可含 inquiry、主动扫描和名称解析，并非“完全被动”。[操作与输出说明 →](docs/usage.md#4-诊断枚举与发现)
 
 ## 硬件与证据边界
 
@@ -89,7 +105,7 @@ Linux + BlueZ
 
 ## 权限模型
 
-向导、计划、worker、报告以普通用户运行。真实运行前交互执行 `sudo -v`，仅由采集子进程使用 `sudo -n btmon`。项目不自动修改 sudoers、不设置 `setcap`，也不要求将整个 TUI 作为 root 启动。BlueZ D-Bus 和串口访问遵循当前系统的策略；先用 `doctor` 检查。
+向导、计划、worker、报告以普通用户运行。交互向导在完整目标 MAC 确认后，可在当前 TTY 调用原生 `sudo -v`，密码由系统 sudo 读取，不经过应用保存；非交互 `run` 仍需预先执行 `sudo -v`。仅由采集子进程使用 `sudo -n btmon`。项目不自动修改 sudoers、不设置 `setcap`，也不要求将整个 TUI 作为 root 启动。BlueZ D-Bus 和串口访问遵循当前系统的策略；先用 `doctor` 检查。
 
 ## 运行产物
 

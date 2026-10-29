@@ -3,12 +3,11 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-import re
 import sys
 
 from . import __version__
 from .config import Plan, load_plan
-from .doctor import adapters, command, diagnose
+from .doctor import adapters, diagnose
 from .evidence import verify_bundle
 
 
@@ -32,6 +31,7 @@ def parser():
     scan.add_argument("--transport", choices=["le", "bredr"], required=True)
     scan.add_argument("--adapter", default="hci0")
     scan.add_argument("--seconds", type=int, default=5)
+    scan.add_argument("--json", action="store_true", help="输出结构化扫描快照与清理状态")
     info = sub.add_parser("ble-info", help="显式连接并发现GATT服务（不请求读写）")
     info.add_argument("--target", required=True)
     info.add_argument("--adapter", default="hci0")
@@ -39,48 +39,15 @@ def parser():
 
 
 def discover(args):
-    if sys.platform != "linux":
-        raise RuntimeError("发现功能需要Linux/BlueZ")
-    if not re.fullmatch(r"hci[0-9]{1,3}", args.adapter) or not 1 <= args.seconds <= 15:
-        raise ValueError("adapter格式错误或扫描时长不在1..15秒")
-    if args.transport == "le":
-        from bleak import BleakScanner
-        async def scan():
-            values = await BleakScanner.discover(timeout=args.seconds, return_adv=True,
-                                                bluez={"adapter": args.adapter})
-            return [dict(address=device.address, name=device.name, rssi=advertisement.rssi,
-                         service_uuids=advertisement.service_uuids) for device, advertisement in values.values()]
-        from .supervisor import adapter_lock
-        with adapter_lock(args.adapter):
-            print(json.dumps(asyncio.run(scan()), ensure_ascii=False, indent=2))
+    from .discovery import scan_devices
+    if args.json:
+        result = scan_devices(args.transport, adapter=args.adapter, seconds=args.seconds)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     else:
-        local = next((v for v in adapters() if v["adapter"] == args.adapter), None)
-        if not local or not local.get("address"):
-            raise RuntimeError("未取得所选控制器地址")
-        # Explicit controller selection in a private bluetoothctl session, then bounded scan.
-        import subprocess
-        import tempfile
-        import time
-        from .supervisor import adapter_lock
-        with adapter_lock(args.adapter), tempfile.TemporaryFile(mode="w+t") as output:
-            process = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE,
-                                       stdout=output, stderr=subprocess.STDOUT,
-                                       text=True, start_new_session=True)
-            try:
-                process.stdin.write(f"select {local['address']}\nscan bredr\n")
-                process.stdin.flush()
-                time.sleep(args.seconds)
-                process.communicate("scan off\nquit\n", timeout=3)
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=2)
-            output.seek(0)
-            print(output.read())
+        from .ui import _scan_snapshot, show_scan_result
+        result = _scan_snapshot(args.transport, args.adapter, args.seconds)
+        show_scan_result(result)
+    return 0 if result.status == "completed" else 130 if result.status == "interrupted" else 1
 
 
 def ble_info(args):
@@ -145,8 +112,7 @@ def main(argv=None):
             print((root/"report.md").read_text(encoding="utf-8"))
             return 0 if result["ok"] else 1
         if args.command == "scan":
-            discover(args)
-            return 0
+            return discover(args)
         if args.command == "ble-info":
             ble_info(args)
             return 0

@@ -11,7 +11,7 @@
 
 A Bash entry point and a Rich terminal wizard for Linux BR/EDR and Bluetooth LE availability experiments. A USB dual-mode Bluetooth adapter generates normal-protocol, bounded workloads; `btmon` records host HCI traffic. An additional nRF52840 with sniffer firmware can provide optional BLE over-the-air capture.
 
-**Development preview: 0.1.0 is unreleased.** Badges describe the project, not CI results or hardware certification. No adapter or target compatibility claim is currently hardware-verified. Synthetic demonstrations are not live-test evidence.
+**Development preview: 0.2.0 is unreleased.** Badges describe the project, not CI results or hardware certification. No adapter or target compatibility claim is currently hardware-verified. Synthetic demonstrations are not live-test evidence.
 
 ![Synthetic Rich terminal preview, not hardware-test evidence](docs/assets/terminal-demo.svg)
 
@@ -47,6 +47,7 @@ The cases use normal protocol operations, not controller exploit injection or RF
 ```bash
 ./bt-dos adapters
 ./bt-dos scan --transport le --adapter hci0 --seconds 5
+./bt-dos scan --transport le --adapter hci0 --seconds 5 --json
 ./bt-dos ble-info --target TARGET --adapter hci0
 ./bt-dos run --plan PLAN.json --confirm TARGET
 ./bt-dos report RUN_DIR
@@ -54,6 +55,20 @@ The cases use normal protocol operations, not controller exploit injection or RF
 ```
 
 Replace the uppercase placeholders. Scanning and service inspection are live radio operations. BR/EDR plans also identify the local adapter address.
+
+## Guided interaction in 0.2.0
+
+Six steps cover environment, case/adapter, target, parameters, evidence, and review. Use `b` to go back and `q` to return home; the draft lives only in the current session's memory. Demo and diagnostics return to the home menu. Review supports section editing and `j` to inspect JSON without re-entering the entire plan. Default, quick, and custom budgets retain the existing protocol limits.
+
+Choose `s` for an explicit scan (5 seconds by default), `m` for manual entry, or `k` to keep the current target. Select from a frozen numbered table showing names, full MAC addresses, RSSI, and, on wide terminals, address type and pairing state. `r` performs exactly one rescan; `f` filters; `t` only sets the next scan to 1–15 seconds—press `r` to scan; `n`/`p` change pages. From the list, `b` returns to the selection-method page; another `b` returns to the previous wizard step. Changing adapter or transport clears both target and characteristic. Any target change clears the old GATT characteristic, including target changes made in another case; selecting `ble-read` again requires re-entry.
+
+![Synthetic scan-selection preview, not live device evidence](docs/assets/scan-preview.svg)
+
+CLI `scan` now defaults to a human-readable table, a change from 0.1. Scripts should use `--json` for a `ScanResult` with `devices`, `status`, `cleanup_status`, and `warnings`. BlueZ merges discovery filters from multiple clients, so every candidate has `transport_verified: false`: it was observed during the requested LE/BR scan window, not proven to use that bearer. Unchanged cached entries are not fresh observations; an empty window does not prove no devices are nearby.
+
+Cancellation returns `status: interrupted`, retaining `cleanup_status` and `warnings`; CLI exit is `130`. An `unconfirmed` cleanup is not ordinary success.
+
+Scanning starts only after an explicit action and does not call Connect/Pair, perform GATT reads/writes, or start a workload. Discovery may include inquiry, active scanning, and name resolution; it is not wholly passive.
 
 ## Evidence and privileges
 
@@ -65,7 +80,7 @@ nRF52840 has two mutually exclusive firmware roles: sniffer firmware for BLE air
 
 If capture-writer exit is unconfirmed, the directory is marked `UNSEALED.json` without a manifest. A confirmed exit requiring forced cleanup is recorded as `cleanup_forced`, not automatic success.
 
-Run the TUI and workers as a regular user. Refresh credentials with `sudo -v` before a live run; only the `btmon` child uses `sudo -n`. The project does not install sudoers rules or capabilities and does not require a root TUI.
+Run the TUI and workers as a regular user. After full target-MAC confirmation, the interactive wizard can invoke native `sudo -v` in the current TTY: sudo reads the password; the application does not store it. Non-interactive `run` still requires credentials refreshed beforehand. Only the `btmon` child uses `sudo -n`. The project does not install sudoers rules or capabilities and does not require a root TUI.
 
 ## Standards and development
 

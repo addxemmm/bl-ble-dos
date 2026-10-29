@@ -7,8 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import btdos
+from btdos import cli as app_cli
+from btdos.discovery import ScanResult
 
 
 class CliTests(unittest.TestCase):
@@ -125,6 +128,23 @@ class CliTests(unittest.TestCase):
         self.assertFalse(value["ok"])
         self.assertTrue(value["errors"])
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_scan_json_preserves_snapshot_cleanup_and_interrupted_exit_code(self):
+        args = app_cli.parser().parse_args(["scan", "--transport", "bredr", "--adapter", "hci1", "--seconds", "3", "--json"])
+        for status, expected in (("completed", 0), ("interrupted", 130), ("failed", 1)):
+            with self.subTest(status=status):
+                result = ScanResult("bredr", "hci1", "2026-01-01T00:00:00Z", 3, [],
+                                    status=status, cleanup_status="released" if status == "completed" else "unconfirmed",
+                                    warnings=["SYNTHETIC scan cleanup warning"])
+                with patch("btdos.discovery.scan_devices", return_value=result) as scan, patch("builtins.print") as output:
+                    self.assertEqual(app_cli.discover(args), expected)
+                scan.assert_called_once_with("bredr", adapter="hci1", seconds=3)
+                output.assert_called_once()
+                value = json.loads(output.call_args.args[0])
+                self.assertEqual(value["status"], status)
+                self.assertEqual(value["requested_transport"], "bredr")
+                self.assertEqual(value["cleanup_status"], result.cleanup_status)
+                self.assertEqual(value["warnings"], result.warnings)
 
 
 if __name__ == "__main__":

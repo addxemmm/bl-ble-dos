@@ -13,6 +13,7 @@ htmlcov/
 work/
 runs/
 captures/
+logs/
 *.btsnoop
 *.pcap
 *.pcapng
