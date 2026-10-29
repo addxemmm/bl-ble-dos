@@ -17,8 +17,9 @@ class CliTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def cli(self, *args):
+    def cli(self, *args, env_overrides=None):
         env = dict(os.environ, PYTHONIOENCODING="utf-8", NO_COLOR="1", TERM="dumb")
+        env.update(env_overrides or {})
         package_root = str(Path(btdos.__file__).resolve().parent.parent)
         env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
         return subprocess.run(
@@ -40,6 +41,14 @@ class CliTests(unittest.TestCase):
         version = self.cli("--version")
         self.assert_success(version)
         self.assertEqual(version.stdout.strip(), btdos.__version__)
+
+    @unittest.skipUnless(sys.platform == "win32", "Regression for Windows redirected cp1252 streams")
+    def test_windows_redirected_cp1252_help_is_reconfigured_to_utf8(self):
+        result = self.cli("--help", env_overrides={"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"})
+        self.assert_success(result)
+        self.assertIn("有界可用性测试", result.stdout)
+        self.assertNotIn("\ufffd", result.stdout)
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
 
     def test_no_arguments_and_explicit_wizard_do_not_hang_without_tty(self):
         for args in ((), ("wizard",)):

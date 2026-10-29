@@ -98,6 +98,11 @@ def ble_info(args):
 
 
 def main(argv=None):
+    # Windows pipes often default to cp1252/ACP; help and JSON are UTF-8 APIs.
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure") and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
     p = parser()
     args = p.parse_args(argv)
     try:
