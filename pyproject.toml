@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bl-ble-dos"
-version = "0.2.0"
+version = "0.3.0"
 description = "Guided, bounded Bluetooth BR/EDR and LE availability testing with evidence bundles"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "addxemmm"}]
-dependencies = ["rich>=13.9,<15", "bleak==3.0.2", "dbus-fast>=5,<6; sys_platform == 'linux'"]
+dependencies = ["rich>=13.9,<15", "prompt-toolkit>=3.0.52,<4", "bleak==3.0.2", "dbus-fast>=5,<6; sys_platform == 'linux'"]
 classifiers = ["Development Status :: 3 - Alpha", "Environment :: Console", "Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
 
 [project.urls]

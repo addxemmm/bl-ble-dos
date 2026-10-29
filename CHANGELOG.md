@@ -2,7 +2,34 @@
 
 本文件记录面向使用者的重要变更。未发布功能不表示已完成硬件验证。
 
-## [0.2.0] — Unreleased
+## [0.3.0] — Unreleased
+
+### Added
+
+- Rich + prompt_toolkit 交互：菜单 ↑↓ / Enter 和显示的快捷键；文字字段 ←→、Home/End、Backspace/Delete，字段隔离的内存历史，不写入持久历史文件。
+- `BTDOS_SIMPLE_INPUT=1` 简单输入备用模式；该模式不支持方向键编辑。更新后应退出旧进程再启动新 UI。
+- 六步安装流程，`--help`、`--non-interactive`、`--install-system`、`--dev`；默认仅检查系统依赖，不执行 apt、不自动启用蓝牙服务，pip 依赖安装仍需网络。
+- 选定目标展示已有 metadata，不自动连接。参数页 `p` 默认否确认后主动探测，`s` 选择结果、`m` 高级手动、`k` 保留或在循环场景直接继续。
+- SDP 服务类 UUID16 参数选择，自定义 UUID128 展示不可选，PSM/RFCOMM channel 仅元数据；`br-channel` 固定 PSM `0x0001` 不变。
+- GATT 服务/特征元数据枚举，不读取值、不配对、不写入或订阅；唯一 readable UUID 可选，保存 UUID 而非瞬时句柄，重复 UUID 需高级手动核对。正式读取须确认厂家允许且无业务副作用。
+- CLI `inspect --transport le|bredr --adapter hci0 --target TARGET --confirm TARGET [--local-address MAC] [--json]`；未确认不探测，JSON 标准输出不混入人读展示，可显式重定向至私有文件。
+
+### Changed
+
+- 默认 `max_ops=10`，快速预检为 `5`，匹配 1 req/s × 10 / 5 秒窗口；硬上限保持 400，显式配置 400 的旧计划仍有效。
+- 设备、适配器或传输变化清除旧探测快照及 SDP / GATT 选择，防止沿用其他目标参数。
+- 兼容入口 `ble-info` 也要求匹配的 `--confirm TARGET`，旧调用须更新；推荐使用 `inspect`。
+- 探测快照独立于测试运行，发生在采集基线之前，只留内存、不自动保存、不作为测试证据。
+- SDP超量输出清理使用丢弃式PIPE排空，避免忽略SIGTERM的子进程因管道反压导致等待回收超时。
+
+### Scope
+
+- SDP 执行预算 15 秒，另有有限子进程清理、1 MiB 输出和 XML/记录限额；不以退出码 0 声称完整服务清单。
+- BLE find/connect/disconnect 预算 8/10/5 秒，D-Bus 每调用 5 秒；取消传播/库内清理可能超过预算，不承诺整体硬墙钟上限。
+- 应用不自动重试，Bleak/BlueZ 底层可能重试或复用。前置 Connected 检查和同用户适配器锁不消除其他客户端竞态；使用独立实验控制器并停止其他客户端，disconnect 可能影响同期连接。
+- 不扩大正常协议负载范围、权限或证据结论；没有新增真实车端 SDP/GATT 或 nRF 兼容性验证声明。
+
+## [0.2.0] — 此前开发预览（未发布）
 
 ### Added
 

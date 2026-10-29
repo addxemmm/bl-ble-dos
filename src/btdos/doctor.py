@@ -61,7 +61,7 @@ def adapters():
 
 def diagnose():
     tools = {name: shutil.which(name) for name in
-             ("btmon", "btmgmt", "bluetoothctl", "tshark", "timeout", "sudo", "nrfutil")}
+             ("btmon", "btmgmt", "bluetoothctl", "sdptool", "tshark", "timeout", "sudo", "nrfutil")}
     service = command(["systemctl", "is-active", "bluetooth"], timeout=2) if sys.platform == "linux" else dict(stdout="not_linux", code=-1)
     controllers = adapters()
     versions = {}
@@ -70,7 +70,7 @@ def diagnose():
             value = command([tools[name], "--version"], timeout=2)
             versions[name] = (value["stdout"] or value["stderr"]).splitlines()[:2]
     dependencies = {}
-    for package in ("bleak", "rich", "dbus-fast"):
+    for package in ("bleak", "rich", "prompt-toolkit", "dbus-fast"):
         try:
             dependencies[package] = version(package)
         except PackageNotFoundError:

@@ -11,6 +11,15 @@ CASES = {
     "ble-cycle": ("LE-02", "BLE", "LE 连接生命周期"),
 }
 MAC = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\Z")
+DEFAULT_BUDGET = dict(rate=1.0, approved_rate=1.0, duration=10.0, max_ops=10,
+                      cycles=5, hold=2.0, gap=3.0, baseline=5.0, recovery=10.0)
+QUICK_BUDGET = dict(DEFAULT_BUDGET, duration=5.0, max_ops=5, cycles=3,
+                    baseline=2.0, recovery=5.0)
+
+
+def budget_defaults(quick=False):
+    """Fresh settings dict; preset changes never mutate shared defaults."""
+    return dict(QUICK_BUDGET if quick else DEFAULT_BUDGET)
 
 
 @dataclass
@@ -21,15 +30,15 @@ class Plan:
     local_address: str | None = None
     characteristic: str | None = None
     sdp_uuid16: int = 0x110B
-    rate: float = 1.0
-    approved_rate: float = 1.0
-    duration: float = 10.0
-    max_ops: int = 400
-    cycles: int = 5
-    hold: float = 2.0
-    gap: float = 3.0
-    baseline: float = 5.0
-    recovery: float = 10.0
+    rate: float = DEFAULT_BUDGET["rate"]
+    approved_rate: float = DEFAULT_BUDGET["approved_rate"]
+    duration: float = DEFAULT_BUDGET["duration"]
+    max_ops: int = DEFAULT_BUDGET["max_ops"]
+    cycles: int = DEFAULT_BUDGET["cycles"]
+    hold: float = DEFAULT_BUDGET["hold"]
+    gap: float = DEFAULT_BUDGET["gap"]
+    baseline: float = DEFAULT_BUDGET["baseline"]
+    recovery: float = DEFAULT_BUDGET["recovery"]
     capture: str = "hci"
     nrf_port: str | None = None
     output_root: str = "runs"

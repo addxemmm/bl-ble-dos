@@ -1,6 +1,5 @@
 """Stable CLI plus an optional interactive guided terminal interface."""
 import argparse
-import asyncio
 import json
 from pathlib import Path
 import sys
@@ -35,6 +34,15 @@ def parser():
     info = sub.add_parser("ble-info", help="显式连接并发现GATT服务（不请求读写）")
     info.add_argument("--target", required=True)
     info.add_argument("--adapter", default="hci0")
+    info.add_argument("--confirm", required=True, help="确认对这个MAC进行主动服务探测")
+    info.add_argument("--json", action="store_true")
+    inspect = sub.add_parser("inspect", help="确认后获取目标SDP/GATT服务元数据；不是测试负载")
+    inspect.add_argument("--transport", choices=["le", "bredr"], required=True)
+    inspect.add_argument("--adapter", default="hci0")
+    inspect.add_argument("--target", required=True)
+    inspect.add_argument("--confirm", required=True, help="必须与目标MAC一致")
+    inspect.add_argument("--local-address", help="可选：核对BR/EDR控制器本机地址")
+    inspect.add_argument("--json", action="store_true", help="仅输出结构化服务快照")
     return p
 
 
@@ -50,18 +58,20 @@ def discover(args):
     return 0 if result.status == "completed" else 130 if result.status == "interrupted" else 1
 
 
-def ble_info(args):
-    if sys.platform != "linux":
-        raise RuntimeError("GATT发现需要Linux/BlueZ")
+def inspect_device(args):
     plan = Plan(case="ble-cycle", adapter=args.adapter, target=args.target)
     plan.validate()
-    from . import cases
-    from types import SimpleNamespace
-    import tempfile
-    from .supervisor import adapter_lock
-    with adapter_lock(plan.adapter), tempfile.TemporaryDirectory(prefix="btdos-info-") as temp:
-        opts = SimpleNamespace(target=plan.target, adapter=plan.adapter, stop_file=str(Path(temp)/"STOP"))
-        asyncio.run(asyncio.wait_for(cases.ble_info(opts), timeout=30))
+    if args.confirm.upper() != plan.target.upper():
+        raise ValueError("--confirm 与目标不一致，未发起服务探测")
+    from .probe import probe_device
+    result = probe_device(getattr(args, "transport", "le"), plan.target,
+                          adapter=plan.adapter, local_address=getattr(args, "local_address", None))
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        from .ui import probe_panel
+        probe_panel(result)
+    return 0 if result.status in ("completed", "no_results") else 130 if result.status == "interrupted" else 1
 
 
 def main(argv=None):
@@ -113,9 +123,8 @@ def main(argv=None):
             return 0 if result["ok"] else 1
         if args.command == "scan":
             return discover(args)
-        if args.command == "ble-info":
-            ble_info(args)
-            return 0
+        if args.command in ("inspect", "ble-info"):
+            return inspect_device(args)
     except KeyboardInterrupt:
         print("\n已停止。", file=sys.stderr)
         return 130

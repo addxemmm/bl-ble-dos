@@ -4,19 +4,34 @@
 
 ## 1. 安装
 
-运行环境为 Linux（面向 Ubuntu / Kali）、Python 3.10+、Bash 和 BlueZ。Windows 可用于源码与发布管理。先安装系统依赖，再安装项目；系统包安装会请求管理员权限。
+运行环境为 Linux（面向 Ubuntu / Kali）、Python 3.10+、Bash 和 BlueZ。Windows 可用于源码与离线开发。以普通用户运行安装脚本；默认检查系统依赖，不执行 apt，也不自动启用蓝牙服务。
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-venv python3-pip bluez
 chmod +x bt-dos scripts/install.sh
+./scripts/install.sh --help
 ./scripts/install.sh
 ./bt-dos doctor
 ```
 
-`install.sh` 在仓库内建立 `.venv`，使用 `pip install -e .` 安装项目；日常使用 `./bt-dos`，无需手动激活环境。`./scripts/install.sh --dev` 在安装后运行单元测试。系统工具缺失、适配器不可用和权限问题以 `doctor` 的实际输出为准，不以安装成功代替运行环境就绪。
+安装按六步推进：①检查 Linux / Python 环境；②检查系统依赖（仅显式选项允许安装）；③创建或复用项目 `.venv`；④通过 pip 联网安装项目依赖；⑤提示适配器、虚拟机和权限检查，不扫描、不连接；⑥运行验证并显示下一步。日常使用 `./bt-dos`，无需激活虚拟环境或全局安装 Python 包。
 
-0.2.0 的 Linux 扫描通过共享的 BlueZ D-Bus API 实现，直接依赖 `dbus-fast>=5,<6`；项目安装会按 Linux 平台依赖安装它。CLI 与向导使用同一限时扫描后端。
+| 选项 | 行为 |
+| --- | --- |
+| `--help` | 显示帮助并退出，不安装、不联网 |
+| `--non-interactive` | 不等待输入，pip 禁用输入、sudo 使用 `-n`；权限缺失立即失败 |
+| `--install-system` | 显式允许 `apt-get update` 和安装 Python / venv / pip / BlueZ；该步骤需要管理员权限和网络 |
+| `--dev` | 安装后增加离线单元测试 |
+
+```bash
+# 仅在明确需要安装系统包时使用；非交互 sudo 需提前准备权限
+sudo -v
+./scripts/install.sh --install-system --non-interactive
+./scripts/install.sh --dev
+```
+
+默认安装仍需 pip 网络访问，不等于离线安装。缺少系统依赖时脚本给出修复命令；`tshark` 不在自动安装范围，避免其额外权限问答。脚本不修改 sudoers、capabilities、rfkill 或蓝牙服务配置；系统包管理器自身的安装行为仍取决于主机策略。安装完成不代表设备就绪，按 `doctor` 的实际结果处理。
+
+Linux 扫描/探测直接依赖 `dbus-fast>=5,<6`，GATT 使用锁定版本 Bleak，交互字段使用 prompt_toolkit；这些依赖由项目安装处理。更新安装后，先退出旧的 `bt-dos` 进程，再重新启动；旧进程继续运行已载入的旧 UI，不会热更新。
 
 ### 从 Windows 部署已提交源码
 
@@ -49,9 +64,18 @@ chmod +x bt-dos scripts/install.sh
 ./bt-dos wizard
 ```
 
-0.2.0 向导按六步组织：**环境 → 用例与适配器 → 选择目标 → 测试参数 → 证据配置 → 复核运行**。普通字段中 `b` / `back` 返回上一步，`q` / `cancel` 回首页。草稿仅保留在当前会话内存，返回首页不会自动启动负载；退出应用后不恢复草稿。首页演示、诊断或一次向导操作完成后回到菜单。
+0.3.0 向导按六步组织：**环境 → 用例与适配器 → 选择目标 → 测试参数 → 证据配置 → 复核运行**。普通字段中 `b` / `back` 返回上一步，`q` / `cancel` 回首页。草稿仅保留在当前会话内存，返回首页不会自动启动负载；退出应用后不恢复草稿。首页演示、诊断或一次向导操作完成后回到菜单。
 
 确认前应核对目标地址、实验隔离、停止条件及恢复方法。实际运行时计划写入新运行目录的 `plan.json`，不建立长期保存车辆信息的项目配置。
+
+### 方向键、字段编辑与备用输入
+
+- 菜单使用 **↑↓ 选择、Enter 确认**；页面显示的 `s`、`m`、`b` 等快捷键仍可直接选择。
+- 文字字段支持 **←→** 移动光标、**Home / End** 到行首尾、**Backspace / Delete** 删除；↑↓ 可回看同一字段的当前进程历史。
+- 字段历史彼此隔离，只保存在内存，不建立持久历史文件；草稿和探测快照退出后也不恢复。终端自身的滚屏或会话录制由使用者管理。
+- 输入不兼容的终端可用 `BTDOS_SIMPLE_INPUT=1 ./bt-dos` 切换简单输入。**备用模式不支持方向键编辑**，使用所示编号或字母后回车。它不是原始终端箭头序列的编辑修复。
+
+参考 [prompt_toolkit 输入文档](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/asking_for_input.html)与[选择菜单文档](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/asking_for_a_choice.html)。
 
 ### 扫描或手动选择目标
 
@@ -77,17 +101,32 @@ chmod +x bt-dos scripts/install.sh
 | `b` | 返回目标选择方式页；再按 `b` 才返回前一个向导步骤 |
 | `q` | 回首页，不启动测试 |
 
-名称、RSSI 和已配对状态只是观察元数据，不证明目标身份或传输承载。更换适配器或 BR/EDR / BLE 传输会同时清除旧目标与特征；任何目标变化都会清除旧 GATT 特征，包括先从 `ble-read` 切到其他场景更换目标、再切回的情况，须重新填写该目标的只读特征。扫描异常不会自动选择候选，可处理后显式重扫或手动输入。
+名称、RSSI 和已配对状态只是观察元数据，不证明目标身份或传输承载。选定目标后自动展示已有元数据，但不因此自动连接。更换设备、适配器或传输会清除旧探测快照、SDP 服务和 GATT 特征选择；适配器或传输变化还会清除旧目标。包括切换场景期间变更目标的情况，都须重新核对服务参数。扫描异常不会自动选择候选，可处理后显式重扫或手动输入。
+
+### 参数页的服务来源
+
+| 输入 | 操作 |
+| --- | --- |
+| `p` | 获取/刷新当前单目标服务信息；先展示主动通信和共享连接风险，确认默认 `n`，明确接受后才探测 |
+| `s` | 存在适用结果时，从已探测的服务 / 可读特征中选择 |
+| `m` | `br-sdp` / `ble-read` 高级手动输入；无探测结果时也可用，须独立核对 |
+| `k` | 保留已核对的服务/特征；`br-channel` / `ble-cycle` 可直接继续，无需探测 |
+
+SDP 列表仅将 `ServiceClassIDList` 的服务 UUID 写入计划，不把协议描述中的 L2CAP / RFCOMM UUID 当服务。可映射到 Bluetooth 基础 UUID 的 UUID16 可选；自定义 UUID128 仅展示，不转换成任意 UUID16。记录句柄、PSM 和 RFCOMM channel 仅元数据，**不改变 `br-channel` 固定 PSM `0x0001`**。
+
+BLE 仅连接和枚举服务 / 特征 UUID、描述、属性、句柄，不读取特征值、不配对、不写入、不订阅。列表只允许选择具有 read 属性且 UUID 唯一的特征，保存完整 UUID 而非瞬时句柄。重复 UUID 仅展示，需高级手动核对，不能自动取第一项；手动 `0xHANDLE` 需现场重新核对数据库。read 属性不是访问权限或无副作用保证，选择后仍需确认厂家允许读取且没有业务副作用。
+
+探测完成不自动选参数，也不自动启动测试。失败、无结果、部分结果或清理未确认均应查看警告，手动输入不应掩盖这些状态。探测时机、预算与保存边界见下文。
 
 ### 预算与最终复核
 
-| 预设 | 请求型窗口 / 速率 | 循环次数 | 基线 / 恢复 |
+| 预设 | 请求型窗口 / 速率 / max_ops | 循环次数 | 基线 / 恢复 |
 | --- | --- | --- | --- |
-| 默认 `default` | 10 秒 / 1 req/s | 5 | 5 / 10 秒 |
-| 快速预检 `quick` | 5 秒 / 1 req/s | 3 | 2 / 5 秒 |
+| 默认 `default` | 10 秒 / 1 req/s / 10 | 5 | 5 / 10 秒 |
+| 快速预检 `quick` | 5 秒 / 1 req/s / 5 | 3 | 2 / 5 秒 |
 | 自定义 `custom` | 逐项编辑并校验 | 逐项编辑并校验 | 逐项编辑并校验 |
 
-预设不扩大协议上限；请求型与循环型参数各按对应场景生效。默认与快速预检均保持 `max_ops=400`、`hold=2`、`gap=3`。复核页可按 `1` 修改用例/适配器、`2` 修改目标、`3` 修改参数、`4` 修改证据，或按 `j` 查看 JSON；保留其他配置，不必从头重填。依赖变化仍会要求补充目标或特征。
+预设不扩大协议上限；请求型与循环型参数各按对应场景生效。默认 `max_ops=10`，快速预检为 `5`，与各自 1 req/s 的 10 / 5 秒窗口匹配；均保持 `hold=2`、`gap=3`。硬上限仍为 `max_ops<=400`，显式写有 `max_ops=400` 的旧计划仍通过原边界校验，不会被默改。复核页可按 `1` 修改用例/适配器、`2` 修改目标、`3` 修改参数、`4` 修改证据，或按 `j` 查看 JSON；保留其他配置，不必从头重填。依赖变化仍会要求补充目标或特征。
 
 无参数入口要求交互式终端；输入或输出被重定向时显示帮助，不进入询问。窄终端由 Rich 自动适配。关闭颜色使用标准环境变量，不是 `--no-color` 参数：
 
@@ -115,7 +154,7 @@ sudo -v
 ./bt-dos scan --transport le --adapter hci0 --seconds 5
 ./bt-dos scan --transport bredr --adapter hci0 --seconds 5
 ./bt-dos scan --transport le --adapter hci0 --seconds 5 --json
-./bt-dos ble-info --target TARGET --adapter hci0
+./bt-dos inspect --transport le --adapter hci0 --target TARGET --confirm TARGET
 ```
 
 `hci0` 是适配器示例，按枚举结果替换；`TARGET` 是被测蓝牙地址占位符。`--seconds` 范围为 1–15 秒，默认 5 秒。
@@ -133,7 +172,41 @@ BlueZ 多客户端发现过滤器会合并；当前所有候选的 `transport_ve
 
 取消扫描返回 `ScanResult(status="interrupted")`，保留清理状态和警告，而不是丢弃 `cleanup_status` / `warnings`；CLI 退出 `130`。须检查清理结果，`cleanup_status="unconfirmed"` 不视作普通成功。完成退出 `0`，其他扫描失败退出 `1`。
 
-`ble-info` 与扫描是不同操作：它会显式连接并发现 GATT 服务，列出特征 UUID、句柄和属性，不发起特征读写。已配对目标的访问策略仍由 BlueZ 与目标决定。
+### 主动能力探测与私有 JSON 快照
+
+`inspect` 与不连接的 `scan` 不同，它明确发起 SDP 服务查询，或连接 BLE 并枚举 GATT 元数据。`--confirm` 必须提供并与目标完整 MAC 一致；没有确认或确认不匹配时不启动探测。不需要 `sudo`，不修改配对、信任或适配器权限。
+
+兼容入口 `ble-info` 在0.3.0也要求 `--confirm TARGET`，并使用同一探测后端；旧版不带确认的调用需更新。建议统一使用 `inspect`。
+
+```bash
+./bt-dos inspect --transport le --adapter hci0 --target TARGET --confirm TARGET
+./bt-dos inspect --transport bredr --adapter hci0 --target TARGET --confirm TARGET --local-address LOCAL_ADDRESS
+# 如需保存，使用已忽略的私有目录；不要把真实设备快照提交Git
+umask 077
+mkdir -p .local
+./bt-dos inspect --transport le --adapter hci0 --target TARGET --confirm TARGET --json > .local/device-snapshot.json
+```
+
+`--json` 的标准输出只包含 JSON，不混入 Rich 表格或进度文本。快照包含目标、适配器、传输、服务/特征、少量元数据、时间，以及 `status` / `cleanup_status` / `warnings`；即使有服务条目，也须检查完成和清理状态。名称、地址、配对状态、UUID 等可能标识设备，分享前去标识化。向导只保留内存、不自动保存；CLI 仅由使用者显式重定向保存。
+
+`completed`、`no_results` 的CLI退出码为0，`interrupted`为130，其他失败为1；`no_results`不证明不存在其他服务。参数/缺少确认错误在探测前结束，须查看标准错误。
+
+探测在测试采集与基线开始**之前**单独发生，**不属于本次运行证据包，也不证明负载时的设备状态**。发现后可能发生服务变化、地址变化或权限变化；`ServicesResolved` 等快照不是未来可读保证。正式测试仍由 supervisor 先等待采集就绪。
+
+| 阶段 | 预算 / 限制 |
+| --- | --- |
+| SDP `sdptool browse --xml` | 执行预算 15 秒，stdout + stderr 合计最多 1 MiB；记录数与 XML 结构限额，拒绝 DTD/实体声明 |
+| SDP 进程清理 | 超时/出错/取消后停止保留输出、丢弃式排空PIPE；terminate/kill各另有2秒等待，末次排空另有2秒；未确认退出如实标记 |
+| BLE 找目标 | 同适配器扫描，8 秒预算 |
+| BLE connect / 枚举 | 一次应用层 connect 调用，10 秒连接预算 |
+| BLE disconnect | 另有 5 秒预算，失败标记 `unconfirmed` |
+| D-Bus 元数据调用 | 每次 5 秒预算，包含连接/状态查询/关闭确认等独立步骤 |
+
+以上是分阶段预算，**不是整个操作的硬墙钟保证**：特别是 Bleak 的取消传播和库内清理可能延长实际耗时。应用不自动重试；Bleak / BlueZ 底层仍可能重试或复用连接。已连接目标前置拒绝，BLE 发现后连接前再次检查；同用户适配器锁只协调本工具，不锁住其他 BlueZ 客户端。请用独立实验控制器并停止其他程序连接目标，检查之后仍存在竞态，探测结束断开可能影响同期连接。
+
+SDP 先通过 BlueZ `Adapter1.Address` 核对 `hciN` 对应本地地址，再以固定参数调用普通用户 `sdptool`，不通过通用 `Device1.Connect` 探测 BR/EDR。`browse` 可能递归服务组，因此“一次有界调用”不是一个 SDP 请求；退出码 0、不为空的服务表、或空结果都不证明清单完整。CLI 和向导复用同一后端，失败不静默当成功。
+
+实现边界参考 [BlueZ sdptool 源码](https://github.com/bluez/bluez/blob/master/tools/sdptool.c)、[Bleak 客户端文档](https://bleak.readthedocs.io/en/stable/api/client.html)及锁定的 [Bleak v3.0.2 BlueZ 客户端源码](https://github.com/hbldh/bleak/blob/v3.0.2/bleak/backends/bluezdbus/client.py)。这些是接口依据，不是本项目车端或 nRF 实测结论。
 
 ## 5. 使用 JSON 计划运行
 
@@ -150,7 +223,7 @@ BlueZ 多客户端发现过滤器会合并；当前所有候选的 `transport_ve
   "rate": 1,
   "approved_rate": 1,
   "duration": 10,
-  "max_ops": 400,
+  "max_ops": 10,
   "cycles": 5,
   "hold": 2,
   "gap": 3,
@@ -184,7 +257,7 @@ sudo -v
 | `rate` | `1`，范围 `0.1–20` | 请求速率，单位 req/s；不等于空口 PPS |
 | `approved_rate` | `1` | 本次实验明确接受的请求速率上界；`rate` 应不高于此值，项目仍限制实际配置速率不超过 20 |
 | `duration` | `10`，范围 `1–60` | 请求型场景负载窗口秒数，不包含全部前后准备时间 |
-| `max_ops` | `400`，范围 `1–400` | 请求型场景操作次数上限，不保证一定达到 |
+| `max_ops` | `10`，范围 `1–400`；快速预检为 `5` | 请求型场景操作次数上限，不保证一定达到 |
 | `cycles` | `5`，最高 `10` | 顺序连接循环上限 |
 | `hold` | `2`，范围 `1–5` | 每轮连接保持秒数 |
 | `gap` | `3`，范围 `3–30` | 循环之间间隔秒数 |
@@ -243,6 +316,8 @@ nrfutil ble-sniffer sniff --port PORT --follow TARGET --output-pcap-file PATH
 
 ## 常见问题
 
+- **更新后仍是旧输入界面**：退出旧 `bt-dos` 进程再启动；确认执行的是当前仓库入口及其 `.venv`。
+- **方向键显示 `^[[A` 等字符**：确认是交互终端且已重启更新后的进程；简单输入备用模式不支持方向键编辑。
 - **找不到 `btmon`**：确认安装了系统 BlueZ 工具，查看 `doctor` 的路径检测。
 - **`sudo -n` 失败**：在同一会话先运行 `sudo -v`，然后重新运行；不自动放宽系统权限。
 - **没有适配器**：检查 `rfkill`、Bluetooth 服务及 USB 直通；参见硬件指南。

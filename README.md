@@ -4,14 +4,14 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6)
 ![Runtime: Linux](https://img.shields.io/badge/runtime-Ubuntu%20%7C%20Kali-0f766e)
-![Interface: Rich TUI](https://img.shields.io/badge/interface-Rich%20TUI-7c3aed)
+![Interface: Rich + prompt_toolkit](https://img.shields.io/badge/interface-Rich%20%2B%20prompt__toolkit-7c3aed)
 ![Status: development preview](https://img.shields.io/badge/status-development%20preview-f59e0b)
 
 [English](README.en.md) · [使用指南](docs/usage.md) · [硬件边界](docs/hardware.md) · [证据与报告](docs/evidence.md) · [参与开发](CONTRIBUTING.md)
 
-面向 Ubuntu / Kali 的 BR/EDR 与 Bluetooth LE 有界负载和可用性观察工具。一个 Bash 入口、一个 Rich 终端向导，使用常见 USB 双模蓝牙适配器发起正常协议交互，同时保存本机 HCI 流量；可另接已刷入 sniffer 固件的 nRF52840，补充 BLE 空口观察。
+面向 Ubuntu / Kali 的 BR/EDR 与 Bluetooth LE 有界负载和可用性观察工具。一个 Bash 入口、一个 Rich + prompt_toolkit 终端向导，使用常见 USB 双模蓝牙适配器发起正常协议交互，同时保存本机 HCI 流量；可另接已刷入 sniffer 固件的 nRF52840，补充 BLE 空口观察。
 
-> **开发预览，0.2.0 尚未发布。** 徽章仅描述项目定位，不表示 CI、硬件兼容或认证结果。合成 demo 与真实硬件运行严格区分；尚无已验证的适配器/被测设备兼容性结论。Kali 实机验证状态以可复核的测试记录为准。
+> **开发预览，0.3.0 尚未发布。** 徽章仅描述项目定位，不表示 CI、硬件兼容或认证结果。合成 demo 与真实硬件运行严格区分；尚无已验证的适配器/被测设备兼容性结论。Kali 实机验证状态以可复核的测试记录为准。
 
 ![Rich 终端界面合成预览：非实测结果](docs/assets/terminal-demo.svg)
 
@@ -19,6 +19,8 @@
 
 - **六步可回退向导**：环境 → 用例与适配器 → 目标 → 参数 → 证据 → 复核；可返回、分区修改和查看 JSON，不必从头填写。
 - **显式扫描选目标**：限时扫描、冻结候选表、编号选择，支持重扫、筛选和翻页；也可手动输入或保留当前目标，不会因进入页面自动连接或测试。
+- **方向键与可编辑字段**：菜单用 ↑↓ / Enter，文字用 ←→、Home/End、Backspace/Delete；字段历史只在当前进程内存中保留。
+- **主动获取服务再选参数**：目标页先展示已知元数据，不自动连接；参数页主动确认后获取 SDP / GATT 服务快照，支持列表选择或高级手动输入。
 - **有界而非无限发送**：默认每秒 1 次请求；速率、持续时间、操作数和连接循环均设硬上限。
 - **采集先于负载**：supervisor 等待 `btmon` 就绪后才启动 worker；关键采集失败会终止运行。
 - **结论不越过证据**：本机请求成功不等于业务正常；缺少业务探针、ECU 观察或空口数据时明确记录缺口。
@@ -38,7 +40,7 @@ chmod +x bt-dos scripts/install.sh
 ./bt-dos
 ```
 
-`--output` 指定父目录，demo 在其下新建时间戳/随机子目录，并打印实际目录及可直接复制的校验命令。无参数在交互终端启动 Rich 向导，非交互输入/输出时显示帮助。先用 `demo` 熟悉输出，实际运行前按 `doctor` 提示准备 Linux、BlueZ、适配器和采集权限。安装脚本在项目内建立 `.venv` 并执行可编辑安装；不要求全局安装 Python 包。详见[安装与运行](docs/usage.md)。
+`--output` 指定父目录，demo 在其下新建时间戳/随机子目录，并打印实际目录及可直接复制的校验命令。无参数在交互终端启动 Rich 向导，非交互输入/输出时显示帮助。先用 `demo` 熟悉输出，实际运行前按 `doctor` 提示准备 Linux、BlueZ、适配器和采集权限。安装脚本分六步检查环境、检查/可选安装系统依赖、准备 `.venv`、联网安装 Python 依赖、提示设备检查、验证并给出下一步。默认不运行 apt，也不自动启用蓝牙服务；`--install-system` 才显式允许 apt 系统安装，`--non-interactive` 不等待输入，`--dev` 增加离线测试，`--help` 只显示帮助。无需全局安装 Python 包。详见[安装与运行](docs/usage.md)。
 
 ## 四个测试场景
 
@@ -51,7 +53,7 @@ chmod +x bt-dos scripts/install.sh
 
 这些场景均为 **normal-protocol bounded workload**：不包含控制器漏洞注入、畸形底层帧、射频干扰或“任何蓝牙设备必定失效”的承诺。正常协议请求仍可能影响脆弱目标；应在目标隔离、停止条件和恢复手段已明确的实验环境运行。
 
-默认请求速率为 `1 req/s`，最高 `20 req/s`，且配置速率不高于计划中的 `approved_rate`；请求型负载的 `duration` 最长 `60 s`，最多 `400` 次操作。信道/连接循环最多 `10` 次，保持 `1–5 s`，循环间隔 `3–30 s`，另有连接与监督超时预算；不保证整个实验在 60 秒内完成。限值是项目的运行边界，**不是法规阈值，也不是目标承受能力保证**。
+默认请求预算为 `1 req/s × 10 s`、`max_ops=10`；快速预检为 `1 req/s × 5 s`、`max_ops=5`。显式配置 `max_ops=400` 的旧计划仍有效。硬上限不变：速率最高 `20 req/s`，且配置速率不高于计划中的 `approved_rate`；请求型负载的 `duration` 最长 `60 s`，最多 `400` 次操作。信道/连接循环最多 `10` 次，保持 `1–5 s`，循环间隔 `3–30 s`，另有连接与监督超时预算；不保证整个实验在 60 秒内完成。限值是项目的运行边界，**不是法规阈值，也不是目标承受能力保证**。
 
 ## 命令速览
 
@@ -62,20 +64,23 @@ chmod +x bt-dos scripts/install.sh
 ./bt-dos scan --transport le --adapter hci0 --seconds 5
 ./bt-dos scan --transport bredr --adapter hci0 --seconds 5
 ./bt-dos scan --transport le --adapter hci0 --seconds 5 --json
-./bt-dos ble-info --target TARGET --adapter hci0
+./bt-dos inspect --transport le --adapter hci0 --target TARGET --confirm TARGET
+./bt-dos inspect --transport bredr --adapter hci0 --target TARGET --confirm TARGET
 ./bt-dos run --plan PLAN.json --confirm TARGET
 ./bt-dos report RUN_DIR
 ./bt-dos verify RUN_DIR
 ./bt-dos demo --output runs/demo
 ```
 
-`TARGET`、`PLAN.json`、`RUN_DIR` 是占位符。实测目标须与计划及 `--confirm` 一致；BR/EDR 场景还需记录实际本地适配器地址。扫描与 `ble-info` 也会触发蓝牙通信，不属于离线演示。
+`TARGET`、`PLAN.json`、`RUN_DIR` 是占位符。实测目标须与计划及 `--confirm` 一致；BR/EDR 场景还需记录实际本地适配器地址。扫描与 `inspect` 也会触发蓝牙通信，不属于离线演示。
 
-### 0.2.0 的目标选择
+### 0.3.0 的交互与目标选择
 
 向导目标页使用 `s` 扫描（默认 5 秒）、`m` 手动输入、`k` 保留当前目标。候选列表显示名称、完整 MAC、RSSI，宽屏额外显示配对状态及地址类型；`r` 每次只重扫一次，`f` 筛选，`t` 仅设置下次扫描为 1–15 秒，按 `r` 才重扫，`n` / `p` 翻页。列表中 `b` 返回选择方式，方式页 `b` 返回上一步；`q` 回首页，草稿仅保留于当前会话内存。首页演示或诊断完成后回到菜单。
 
-默认、快速预检和自定义预算均沿用现有协议上限。变更适配器或传输会同时清除旧目标与特征；任何目标变化都会清除旧 GATT 特征，再选 `ble-read` 时须重新填写。最终复核可直接修改分区，或按 `j` 查看 JSON。
+菜单支持 ↑↓ 选择、Enter 确认，也保留所示快捷键；输入字段支持 ←→、Home/End、Backspace/Delete 和同字段的内存历史，不写入历史文件。`BTDOS_SIMPLE_INPUT=1 ./bt-dos` 使用简单输入备用模式，**该模式不支持方向键编辑**。安装更新后须退出旧进程再启动，运行中的旧向导不会热更新。
+
+默认、快速预检和自定义预算均沿用现有协议硬上限。变更设备、适配器或传输会清除旧探测快照、SDP 服务和 GATT 特征选择（适配器/传输变化也清除目标）；须针对当前目标重新核对参数。最终复核可直接修改分区，或按 `j` 查看 JSON。
 
 ![扫描候选界面合成预览：非实测设备列表](docs/assets/scan-preview.svg)
 
@@ -84,6 +89,16 @@ CLI `scan` 默认输出人读表格；脚本应使用 `--json` 获取含 `device
 取消扫描会返回 `status: interrupted`，保留 `cleanup_status` 与 `warnings`，CLI 退出 `130`；清理状态 `unconfirmed` 不是普通成功。
 
 扫描只在明确选择后启动，不调用 Connect / Pair、GATT 读写或测试负载；发现过程可含 inquiry、主动扫描和名称解析，并非“完全被动”。[操作与输出说明 →](docs/usage.md#4-诊断枚举与发现)
+
+### 获取服务与选择参数
+
+![服务信息界面合成预览：非真实设备数据](docs/assets/service-preview.svg)
+
+选择目标后只展示已知的名称、地址、配对等元数据，不自动连接。参数页 `p` 获取/刷新服务信息，明确确认默认 `n`，确认后才执行一次有界主动探测；`s` 从已探测结果选择，`m` 高级手动输入，`k` 保留已核对选择，循环类场景可直接继续而不探测。
+
+SDP 只将 `ServiceClassIDList` 中可表示为 UUID16 的服务写入计划；自定义 UUID128 仅展示，PSM / RFCOMM channel 仅元数据，`br-channel` 始终使用 PSM `0x0001`。BLE 探测连接并枚举服务/特征，不读取值、不配对、不写入或订阅。只有具备 read 属性且 UUID 唯一的特征可列表选择，写入 UUID 而非易漂移的句柄；重复 UUID 须高级手动核对。正式读取前仍须厂家确认可读且无业务副作用。
+
+探测是**抓包基线开始前的独立快照，不是本次测试证据**，向导只保留内存、不自动保存。CLI `inspect` 要求 `--confirm TARGET`，`--json` 仅输出 JSON；需要保存时自行重定向至私有文件。SDP 执行预算 15 秒（另有有限子进程清理），BLE 扫描/连接/断开预算分别 8/10/5 秒，D-Bus 每调用 5 秒；取消传播和库内清理可能超出预算。应用不自动重试，底层 Bleak/BlueZ 可能重试或复用；请使用独立控制器并停止其他客户端，前置状态检查不消除共享连接竞态。详细状态与限制见[主动能力探测](docs/usage.md#主动能力探测与私有-json-快照)。
 
 ## 硬件与证据边界
 

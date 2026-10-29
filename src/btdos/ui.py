@@ -1,5 +1,6 @@
 """Guided Rich UI. Discovery is explicit; editing never starts a workload."""
 from dataclasses import dataclass, field
+from collections import Counter
 import json
 import math
 import os
@@ -13,16 +14,16 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
-from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
 from . import __version__
-from .config import CASES, MAC, Plan
+from .config import CASES, MAC, Plan, budget_defaults
 from .discovery import safe_display_name, scan_devices
 from .doctor import command, diagnose
 from .supervisor import create_demo, run_plan
+from .terminal import Prompt
 
 console = Console(highlight=False, theme=Theme({"accent": "bright_cyan", "muted": "dim", "good": "green", "warn": "yellow"}))
 STEPS = ("环境", "用例与适配器", "选择目标", "测试参数", "证据配置", "复核运行")
@@ -47,6 +48,7 @@ class TargetSelection:
     requested_transport: str = ""
     rssi: int | None = None
     paired: bool | None = None
+    known_services: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -56,11 +58,10 @@ class WizardDraft:
     target: TargetSelection | None = None
     local_address: str | None = None
     characteristic: str | None = None
-    sdp_uuid16: int = 0x110B
+    sdp_uuid16: int | None = None
     preset: str = "default"
-    settings: dict = field(default_factory=lambda: dict(
-        rate=1.0, approved_rate=1.0, duration=10.0, max_ops=400,
-        cycles=5, hold=2.0, gap=3.0, baseline=5.0, recovery=10.0,
+    probe_result: object | None = None
+    settings: dict = field(default_factory=lambda: dict(budget_defaults(),
         capture="hci", nrf_port=None, output_root="runs",
         external_business_probe=False, external_ecu_observation=False,
     ))
@@ -68,10 +69,12 @@ class WizardDraft:
     def to_plan(self):
         if self.target is None:
             raise ValueError("先选择并核对一个目标")
+        if self.case == "br-sdp" and self.sdp_uuid16 is None:
+            raise ValueError("先为当前目标选择或手动确认SDP服务，不能沿用其他目标的服务")
         plan = Plan(case=self.case, adapter=self.adapter, target=self.target.address,
                     local_address=self.local_address if self.case.startswith("br-") else None,
                     characteristic=self.characteristic if self.case == "ble-read" else None,
-                    sdp_uuid16=self.sdp_uuid16, **self.settings)
+                    sdp_uuid16=self.sdp_uuid16 if self.sdp_uuid16 is not None else 0x110B, **self.settings)
         plan.validate()
         return plan
 
@@ -84,22 +87,26 @@ def banner(output=None):
     output = output or console
     title = Text("BL / BLE  DOS LAB", style="bold bright_cyan")
     title.append("   /   GUIDED WORKSPACE", style="dim")
-    title.append("\n选择设备 · 审阅计划 · 留存证据", style="white")
+    title.append("\n选择设备 · 审阅计划 · 留存证据")
     title.append(f"\nv{__version__}  ·  单 dongle HCI  /  可选 nRF52840 BLE 空口", style="dim")
     output.print(Panel(title, box=box.ROUNDED, border_style="cyan", padding=(1, 2)))
 
 
-def ask_text(label, default=None, validator=None, choices=None):
+def ask_text(label, default=None, validator=None, choices=None, options=None, history=True):
     """All fields accept b/back and q/cancel; invalid values stay at the field."""
     while True:
         try:
-            value = Prompt.ask(Text(label), default=default, console=console).strip()
+            value = Prompt.ask(Text(label), default=default, console=console,
+                               options=options, history=history).strip()
         except EOFError as exc:
             raise Cancel() from exc
         if value.lower() in ("b", "back"):
             raise Back()
         if value.lower() in ("q", "cancel"):
             raise Cancel()
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            console.print("[yellow]输入含控制字符；请重新输入，或重新安装后使用方向键编辑。[/yellow]")
+            continue
         if choices and value.lower() not in choices:
             console.print(Text("请选择 " + " / ".join(choices), style="yellow"))
             continue
@@ -109,6 +116,11 @@ def ask_text(label, default=None, validator=None, choices=None):
             return value.lower() if choices else value
         except (ValueError, TypeError, OverflowError) as exc:
             console.print(Text(f"输入需要调整：{exc}", style="yellow"))
+
+
+def ask_choice(label, options, default=None):
+    """A labelled menu in a TTY; exact keys remain usable in simple terminals."""
+    return ask_text(label, default=default, choices=tuple(key for key, _ in options), options=options)
 
 
 def ask_number(label, default, minimum, maximum, integer=False):
@@ -121,7 +133,7 @@ def ask_number(label, default, minimum, maximum, integer=False):
 
 
 def ask_yes(label, default=False):
-    return ask_text(label + " [y/n]", default="y" if default else "n", choices=("y", "n")).lower() == "y"
+    return ask_choice(label, [("n", "否 / 未安排"), ("y", "是 / 已安排")], default="y" if default else "n") == "y"
 
 
 def _mac(value):
@@ -144,7 +156,7 @@ def _section(index, draft):
     if draft.target:
         line.append(f"  ·  {draft.target.address}")
     console.print(line)
-    console.print("[dim]回车接受默认值 · b 上一步 · q 返回首页 · 当前输入只保留于本次会话[/dim]")
+    console.print("[dim]菜单 ↑↓/回车 · 输入框 ←→/Home/End/删除 · b返回 · q首页 · 历史仅在内存[/dim]")
 
 
 def diagnostics_table(data):
@@ -223,7 +235,10 @@ def pick_target(transport, adapter, current=None):
             if current:
                 console.print(Panel(Text(f"当前目标  {current.address}\n{clean(current.display_name)}  ·  {current.source}"), border_style="cyan"))
             console.print("s 扫描后选择 · m 手动地址" + (" · k 保留当前目标" if current else ""))
-            choice = ask_text("选择目标方式", default="k" if current else "s", choices=("s", "m", "k") if current else ("s", "m")).lower()
+            choices = [("s", "扫描附近设备并从列表选择"), ("m", "手动填写设备地址")]
+            if current:
+                choices.append(("k", "保留当前目标 " + current.address))
+            choice = ask_choice("选择目标方式", choices, default="k" if current else "s")
             if choice == "k":
                 return current
             if choice == "m":
@@ -252,7 +267,11 @@ def pick_target(transport, adapter, current=None):
         console.print(Text(f"{transport.upper()}扫描期间观察；承载与车端身份待核实。页 {page+1}/{pages}", style="dim"))
         console.print("编号选择 · r重扫 · f筛选 · t时长 · m手动 · n/p翻页 · b返回选择方式 · q取消")
         try:
-            action = ask_text("设备或操作", default="r" if not snapshot else None)
+            options = [(str(i+1), f"{clean(d.display_name or '未命名', 35)}  {d.address}")
+                       for i, d in enumerate(visible) if page*8 <= i < (page+1)*8]
+            options.extend([("r", "重新扫描一次"), ("f", "筛选当前列表"), ("t", "调整下次扫描时长"),
+                            ("m", "手动输入地址"), ("n", "下一页"), ("p", "上一页")])
+            action = ask_choice("设备或操作", options, default="r" if not snapshot else options[0][0])
         except Back:
             result = None
             continue
@@ -297,7 +316,7 @@ def pick_target(transport, adapter, current=None):
             console.print("[yellow]输入当前页有效编号，或选择上面的操作。[/yellow]")
             continue
         return TargetSelection(device.address.upper(), clean(device.display_name), "scan_observation",
-                               device.address_type, transport, device.rssi, device.paired)
+                               device.address_type, transport, device.rssi, device.paired, list(device.services))
 
 
 def review_panel(plan, target_info=None):
@@ -306,7 +325,7 @@ def review_panel(plan, target_info=None):
     table.add_column()
     table.add_row("用例", Text(f"{CASES[plan.case][0]} · {CASES[plan.case][2]}"))
     table.add_row("适配器", Text(plan.adapter + (f" / {plan.local_address}" if plan.local_address else "")))
-    table.add_row("完整目标", Text(plan.target, style="bold bright_white"))
+    table.add_row("完整目标", Text(plan.target, style="bold"))
     if target_info:
         table.add_row("发现来源", Text(f"{clean(target_info.display_name)} · {target_info.source}"))
     if plan.case in ("br-sdp", "ble-read"):
@@ -357,7 +376,7 @@ def execute(plan):
         path, status = run_plan(plan, update)
     sealed = (path / "manifest.json").is_file()
     text = Text(f"运行状态  {status}\n", style="bold green" if status == "completed" else "bold yellow")
-    text.append(f"证据目录  {path}\n报告      {path / 'report.md'}\n", style="white")
+    text.append(f"证据目录  {path}\n报告      {path / 'report.md'}\n")
     text.append("已封存；可使用 verify 复核完整性。" if sealed else "未封存/部分记录，请保留目录并检查 UNSEALED 标记。", style="green" if sealed else "yellow")
     text.append("\n执行完成不等于车辆合规PASS。", style="dim")
     console.print(Panel(text, border_style="green" if status == "completed" else "yellow", title="EVIDENCE / 运行结果"))
@@ -378,7 +397,7 @@ def demo(output):
 def _environment(info):
     while True:
         console.print(diagnostics_table(info))
-        value = ask_text("回车继续 / r重新检测", default="n", choices=("n", "r"))
+        value = ask_choice("环境检查后的操作", [("n", "继续配置"), ("r", "重新检测环境")], default="n")
         if value.lower() == "r":
             with console.status("重新检查本机环境…"):
                 info = diagnose()
@@ -394,20 +413,25 @@ def _case_adapter(draft, info):
     for i, ((name, details), hint) in enumerate(zip(CASES.items(), hints), 1):
         table.add_row(str(i), details[1], details[0]+" "+details[2], hint)
     console.print(table)
-    case = list(CASES)[ask_number("用例编号", list(CASES).index(draft.case)+1, 1, 4, integer=True)-1]
+    case_options = [(str(i), f"{details[1]} · {details[2]}") for i, details in enumerate(CASES.values(), 1)]
+    case = list(CASES)[int(ask_choice("选择测试场景", case_options, str(list(CASES).index(draft.case)+1)))-1]
     devices = info["adapters"]
     table = Table("#", "控制器", "本机地址", "名称", box=box.SIMPLE, expand=True)
     for i, item in enumerate(devices, 1):
         table.add_row(str(i), item["adapter"], Text(item.get("address") or "未核实"), Text(clean(item.get("name", "—"))))
     console.print(table)
     default = next((i for i, item in enumerate(devices, 1) if item["adapter"] == draft.adapter), 1)
-    selected = devices[ask_number("控制器编号", default, 1, len(devices), integer=True)-1]
+    controller_options = [(str(i), f"{item['adapter']} · {item.get('address') or '地址待核实'} · {clean(item.get('name', 'USB蓝牙控制器'))}")
+                          for i, item in enumerate(devices, 1)]
+    selected = devices[int(ask_choice("选择发起测试的USB控制器", controller_options, str(default)))-1]
     changed = selected["adapter"] != draft.adapter or CASES[case][1] != CASES[draft.case][1]
     if changed:
         if draft.target:
             console.print("[yellow]适配器或传输已改变，旧目标与特征已清除，请重新核对。[/yellow]")
         draft.target = None
         draft.characteristic = None
+        draft.sdp_uuid16 = None
+        draft.probe_result = None
     draft.case, draft.adapter, draft.local_address = case, selected["adapter"], selected.get("address")
     if case.startswith("br-") and not draft.local_address:
         raise ValueError("控制器地址尚未核实，请返回环境页刷新BlueZ状态")
@@ -415,28 +439,178 @@ def _case_adapter(draft, info):
         draft.settings.update(capture="hci", nrf_port=None)
 
 
-def _parameters(draft):
+def probe_device(*args, **kwargs):
+    # Lazy import keeps offline input/demo paths independent of probe dependencies.
+    from .probe import probe_device as collect
+    return collect(*args, **kwargs)
+
+
+def target_panel(target, adapter):
+    rows = Table.grid(padding=(0, 2))
+    rows.add_column(style="cyan")
+    rows.add_column()
+    rows.add_row("设备", Text(clean(target.display_name)))
+    rows.add_row("完整地址", Text(target.address, style="bold"))
+    rows.add_row("控制器 / 来源", Text(f"{adapter} / {target.source}"))
+    rows.add_row("地址类型 / RSSI", Text(f"{target.address_type} / {target.rssi if target.rssi is not None else '未知'}"))
+    rows.add_row("已配对", "是" if target.paired else "否" if target.paired is not None else "未知")
+    if target.known_services:
+        rows.add_row("BlueZ已知UUID提示", Text("\n".join(clean(value) for value in target.known_services[:20])))
+    rows.add_row("状态", "以上为发现元数据，不证明车端身份、当前承载或完整服务清单。")
+    return Panel(rows, title="DEVICE / 已选设备", border_style="cyan")
+
+
+def probe_panel(result):
+    summary = Text(f"{result.transport.upper()} · {result.adapter} · {result.target}\n"
+                   f"状态 {result.status} / 清理 {result.cleanup_status} / 用时 {result.duration:.1f}s\n"
+                   "服务探测发生在正式抓包基线前，不计作测试负载或正式流量证据。")
+    console.print(Panel(summary, title="CAPABILITIES / 设备服务快照", border_style="cyan"))
+    for warning in result.warnings:
+        console.print(Text(clean(warning, 400), style="yellow"))
+    metadata = getattr(result, "metadata", {})
+    if metadata:
+        console.print(Text("BlueZ元数据  " + " · ".join(
+            f"{clean(key, 30)}={clean(value, 100)}" for key, value in metadata.items() if key != "UUIDs")))
+    services = Table("服务名称", "服务UUID", "记录 / PSM / RFCOMM", box=box.SIMPLE, expand=True)
+    for service in result.services[:20]:
+        record = getattr(service, "record_handle", None)
+        details = f"{record if record is not None else '—'} / {getattr(service, 'psm', None) or '—'} / {getattr(service, 'channel', None) or '—'}"
+        services.add_row(Text(clean(service.name or "未命名")), Text(clean(service.uuid)), Text(details))
+    if result.services:
+        console.print(services)
+        if len(result.services) > 20:
+            console.print(Text(f"服务共{len(result.services)}项；摘要仅展示前20项，选择页支持筛选和翻页。", style="dim"))
+    if result.characteristics:
+        table = Table("特征名称", "特征UUID / 当前句柄", "属性", box=box.SIMPLE, expand=True)
+        for char in result.characteristics[:20]:
+            handle = f"0x{char.handle:04X}" if char.handle is not None else "句柄未知"
+            table.add_row(Text(clean(char.description or "未命名", 50)), Text(f"{char.uuid}\n{handle}"),
+                          Text(", ".join(char.properties)))
+        console.print(table)
+        if len(result.characteristics) > 20:
+            console.print(Text(f"特征共{len(result.characteristics)}项；摘要仅展示前20项，选择页支持筛选和翻页。", style="dim"))
+
+
+def _choose_catalog(options, title):
+    """Bound the visible menu; filtering never triggers another radio operation."""
+    page, query = 0, ""
+    while True:
+        filtered = [(value, label) for value, label in options
+                    if query.casefold() in label.casefold() or query.casefold() in value.casefold()]
+        pages = max(1, math.ceil(len(filtered)/8))
+        page = min(page, pages-1)
+        visible = filtered[page*8:(page+1)*8]
+        labels = [(str(i), label) for i, (_, label) in enumerate(visible, 1)]
+        labels.extend([("f", "按名称/UUID筛选当前快照"), ("n", "下一页"), ("p", "上一页")])
+        console.print(Text(f"{len(filtered)}项 · 页{page+1}/{pages} · 选择不重新探测", style="dim"))
+        action = ask_choice(title, labels, default="1" if visible else "f")
+        if action == "f":
+            query, page = ask_text("服务/特征筛选词（空值清除）", default=""), 0
+        elif action in ("n", "p"):
+            page = max(0, min(pages-1, page+(1 if action == "n" else -1)))
+        else:
+            return visible[int(action)-1][0]
+
+
+def _probe_matches(draft):
+    result = draft.probe_result
+    return (result is not None and result.target.upper() == draft.target.address.upper()
+            and result.adapter == draft.adapter
+            and result.transport == ("bredr" if draft.case.startswith("br-") else "le"))
+
+
+def _manual_service(draft):
     if draft.case == "ble-read":
-        console.print("[dim]只使用OEM确认无副作用的短只读特征；扫描名称不证明服务存在。[/dim]")
+        console.print("[dim]高级手动输入：UUID须唯一；句柄可能随数据库变化，需现场重新核对。read属性不保证无业务副作用。[/dim]")
         def char_valid(value):
             Plan(case="ble-read", adapter=draft.adapter, target=draft.target.address, characteristic=value).validate()
         draft.characteristic = ask_text("特征 UUID / 0xHANDLE", default=draft.characteristic, validator=char_valid)
-    if draft.case == "br-sdp":
+    elif draft.case == "br-sdp":
+        console.print("[dim]未探测时的0x110B仅为手动输入示例，不表示目标支持该服务。[/dim]")
         def uuid_valid(value):
             if not 0 <= int(value, 0) <= 65535:
                 raise ValueError("UUID16 范围 0x0000..0xFFFF")
-        draft.sdp_uuid16 = int(ask_text("SDP服务UUID16（核对服务清单）", default=f"0x{draft.sdp_uuid16:04x}", validator=uuid_valid), 0)
+        default = f"0x{draft.sdp_uuid16:04x}" if draft.sdp_uuid16 is not None else None
+        draft.sdp_uuid16 = int(ask_text("SDP服务UUID16（核对服务清单）", default=default, validator=uuid_valid), 0)
+
+
+def _service_parameters(draft):
+    """Explicit service discovery, then select metadata; never read values here."""
+    console.print(target_panel(draft.target, draft.adapter))
+    needs_service = draft.case in ("br-sdp", "ble-read")
+    while True:
+        result = draft.probe_result if _probe_matches(draft) else None
+        selectable = []
+        if result is not None:
+            probe_panel(result)
+            if result.status == "completed" and result.cleanup_status in ("released", "disconnected", "closed", "process_exited"):
+                if draft.case == "br-sdp":
+                    selectable = [(f"0x{s.uuid16:04X}", f"{clean(s.name or 'SDP服务', 50)} · 0x{s.uuid16:04X}")
+                                  for s in result.services if s.selectable and s.uuid16 is not None]
+                    # Distinct records may share one service class; one UUID option is enough.
+                    selectable = list(dict(selectable).items())
+                elif draft.case == "ble-read":
+                    counts = Counter(char.uuid.lower() for char in result.characteristics)
+                    selectable = [(char.uuid, f"{clean(char.description or '可读特征', 35)} · {char.uuid}")
+                                  for char in result.characteristics if char.readable and counts[char.uuid.lower()] == 1]
+                    if any(char.readable and counts[char.uuid.lower()] > 1 for char in result.characteristics):
+                        console.print("[yellow]重复UUID的特征仅展示，不自动取第一项；需高级手动核对或调整设备配置。[/yellow]")
+        options = [("p", "获取/刷新服务信息（将对这个目标发起限时服务探测）")]
+        if selectable:
+            options.insert(0, ("s", "从已探测的服务/可读特征列表选择"))
+        if needs_service:
+            options.append(("m", "高级：手动输入目标服务UUID / 特征"))
+            selected = draft.characteristic if draft.case == "ble-read" else draft.sdp_uuid16
+            if selected is not None:
+                options.append(("k", "保留已核对的服务/特征选择"))
+            default = "s" if selectable else "k" if selected is not None else "p"
+        else:
+            options.append(("k", "继续：本用例不需要选择业务服务"))
+            default = "k"
+        action = ask_choice("目标服务与参数来源", options, default=default)
+        if action == "k":
+            return
+        if action == "m":
+            _manual_service(draft)
+            return
+        if action == "s":
+            try:
+                value = _choose_catalog(selectable, "选择本次请求的服务" if draft.case == "br-sdp" else "选择本次请求的只读特征")
+            except Back:
+                continue
+            if draft.case == "ble-read":
+                if not ask_yes("已由厂家/测试计划确认该特征可重复读取且无控制副作用？", default=False):
+                    continue
+                draft.characteristic = value
+            else:
+                draft.sdp_uuid16 = int(value, 16)
+            return
+        transport = "bredr" if draft.case.startswith("br-") else "le"
+        console.print(Panel(Text(f"目标 {draft.target.address} / {draft.adapter} / {transport.upper()}\n"
+            "本次仅调用一次限时服务探测，不启动测试负载；底层库/BlueZ可能重试。\n"
+            "SDP会产生服务发现请求；BLE会连接并枚举服务，不读取特征值、不配对、不写入或订阅。\n"
+            "请使用独立测试控制器并停止其他程序连接此目标；共享连接存在竞态，结束断开可能影响同期客户端。"),
+            border_style="yellow", title="主动探测确认"))
+        if not ask_yes("确认现在对上述单个目标获取服务信息？", default=False):
+            continue
+        with console.status("获取设备服务信息…；连接预算及额外清理时间见使用指南"):
+            draft.probe_result = probe_device(transport, draft.target.address, adapter=draft.adapter,
+                                              local_address=draft.local_address if transport == "bredr" else None)
+        # Failed/partial snapshots are shown, never silently used as complete lists.
+
+
+def _parameters(draft):
+    _service_parameters(draft)
     console.print(Panel("1  默认计划  ·  1req/s / 10s，5轮，基线5s / 恢复10s\n2  快速预检  ·  1req/s / 5s，3轮，基线2s / 恢复5s\n3  自定义    ·  保留现有值，逐项校验；不扩大工具上限", border_style="blue", title="预算预设"))
     console.print("[dim]请求用例使用请求率/窗口；循环用例使用轮数/保持/间隔，不同时叠加。[/dim]")
     default = {"default": "1", "quick": "2", "custom": "3"}[draft.preset]
-    preset = ask_text("选择预设", default=default, choices=("1", "2", "3"))
+    preset = ask_choice("选择测试预算", [("1", "默认低负载 · 请求1次/秒、10秒 / 循环5轮"),
+                        ("2", "快速预检 · 请求1次/秒、5秒 / 循环3轮"),
+                        ("3", "自定义 · 逐项调整并校验")], default=default)
     draft.preset = {"1": "default", "2": "quick", "3": "custom"}[preset]
     settings = draft.settings
     if preset != "3":
-        quick = preset == "2"
-        settings.update(rate=1.0, approved_rate=1.0, duration=5.0 if quick else 10.0,
-                        max_ops=400, cycles=3 if quick else 5, hold=2.0, gap=3.0,
-                        baseline=2.0 if quick else 5.0, recovery=5.0 if quick else 10.0)
+        settings.update(budget_defaults(quick=preset == "2"))
         return
     if draft.case in ("br-sdp", "ble-read"):
         settings["approved_rate"] = ask_number("试验计划批准上限 req/s（参数声明）", settings["approved_rate"], 0.1, 20)
@@ -456,7 +630,8 @@ def _evidence(draft, info):
     options = ("1", "2") if draft.case.startswith("ble-") else ("1",)
     default = "2" if draft.settings["capture"] == "hci+nrf" and "2" in options else "1"
     while True:
-        choice = ask_text("采集方式", default=default, choices=options)
+        labels = {"1": "单USB dongle：本机HCI抓包（必选基础证据）", "2": "HCI + nRF52840：额外BLE空口采集"}
+        choice = ask_choice("选择抓包硬件", [(key, labels[key]) for key in options], default=default)
         if choice != "2" or info["tools"].get("nrfutil"):
             break
         console.print("[yellow]尚未安装nrfutil；可选1继续，或按docs/hardware.md准备后再配置。[/yellow]")
@@ -481,7 +656,7 @@ def _ensure_capture_permission():
     if getattr(os, "geteuid", lambda: 1000)() == 0 or command(["sudo", "-n", "true"], timeout=2)["code"] == 0:
         return True
     console.print(Panel("HCI抓包需要sudo认证。可在当前终端刷新；密码由系统sudo读取，本工具不保存。", border_style="yellow"))
-    action = ask_text("a 现在认证 / b 返回配置 / q 取消", default="a", choices=("a",))
+    action = ask_choice("采集权限准备", [("a", "现在通过系统sudo认证（密码不保存）")], default="a")
     if action == "a":
         from .capture import system_binary
         result = subprocess.run([system_binary("sudo"), "-v"], check=False)
@@ -513,9 +688,11 @@ def run_wizard(info=None, draft=None):
                 draft.target = pick_target("bredr" if draft.case.startswith("br-") else "le", draft.adapter, draft.target)
                 if old_address != draft.target.address:
                     draft.characteristic = None
-                    if draft.case == "ble-read":
+                    draft.sdp_uuid16 = None
+                    draft.probe_result = None
+                    if draft.case in ("br-sdp", "ble-read"):
                         review_after_edit = False
-                        console.print("[dim]目标已改变，下一步重新确认该目标的只读特征。[/dim]")
+                        console.print("[dim]目标已改变，下一步重新确认该目标的服务或只读特征。[/dim]")
             elif index == 3:
                 _parameters(draft)
             elif index == 4:
@@ -524,7 +701,9 @@ def run_wizard(info=None, draft=None):
                 plan = draft.to_plan()
                 console.print(review_panel(plan, draft.target))
                 console.print("r 运行 · 1 修改用例/适配器 · 2 修改目标 · 3 修改参数 · 4 修改证据 · j 查看JSON · q取消")
-                action = ask_text("下一步", default="r", choices=("r", "1", "2", "3", "4", "j"))
+                action = ask_choice("下一步", [("r", "核对完整目标地址后运行"), ("1", "修改用例和USB控制器"),
+                    ("2", "修改目标设备"), ("3", "修改服务和测试参数"), ("4", "修改抓包与证据配置"),
+                    ("j", "查看完整JSON计划")], default="r")
                 if action == "j":
                     console.print_json(json.dumps(plan.to_dict()))
                     continue
@@ -532,7 +711,7 @@ def run_wizard(info=None, draft=None):
                     index, review_after_edit = int(action), True
                     continue
                 console.print("[yellow]核对静止隔离台架、非控制性负载、独立停止措施和批准预算。发现候选不证明车端身份。[/yellow]")
-                confirmation = ask_text("输入完整目标MAC确认（其他输入取消本次启动）", default="CANCEL")
+                confirmation = ask_text("输入完整目标MAC确认（其他输入取消本次启动）", default="CANCEL", history=False)
                 if confirmation.upper() != plan.target.upper():
                     console.print("[yellow]未确认，保持计划并返回复核页；没有启动负载。[/yellow]")
                     continue
@@ -561,8 +740,10 @@ def wizard():
             table.add_row(Text(key, style="cyan"), label, Text(hint, style="dim"))
         console.print(table)
         try:
-            choice = ask_text("选择入口", default="1", choices=("0", "1", "2", "3", "4"))
+            choice = ask_choice("选择入口", [("1", "离线演示：不使用无线硬件"), ("2", "检查环境和USB设备"),
+                ("3", "引导式测试：扫描目标、选择服务、复核执行"), ("4", "查看使用文档位置"), ("0", "退出程序")], default="1")
             if choice == "0":
+                Prompt.clear_history()
                 return 0
             if choice == "1":
                 demo("runs")
@@ -576,8 +757,10 @@ def wizard():
                 console.print(Panel("README.md\ndocs/usage.md\ndocs/hardware.md\ndocs/evidence.md", title="文档导航", border_style="cyan"))
             console.rule("返回首页")
         except (Cancel, Back, EOFError):
+            Prompt.clear_history()
             return 0
         except KeyboardInterrupt:
+            Prompt.clear_history()
             console.print("\n[dim]已退出向导。[/dim]")
             return 130
         except (OSError, ValueError, RuntimeError) as exc:

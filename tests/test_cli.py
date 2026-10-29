@@ -146,6 +146,38 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(value["cleanup_status"], result.cleanup_status)
                 self.assertEqual(value["warnings"], result.warnings)
 
+    def test_inspect_requires_matching_confirmation_before_any_probe(self):
+        from btdos import probe
+        with patch.object(probe, "probe_device") as collect:
+            for command in ("inspect", "ble-info"):
+                extra = ["--transport", "le"] if command == "inspect" else []
+                with self.subTest(command=command), patch("sys.stderr"):
+                    self.assertEqual(app_cli.main([command, *extra, "--target", "02:00:00:00:00:01",
+                        "--confirm", "02:00:00:00:00:02"]), 1)
+            collect.assert_not_called()
+        for command in ("inspect", "ble-info"):
+            extra = ["--transport", "le"] if command == "inspect" else []
+            result = self.cli(command, *extra, "--target", "02:00:00:00:00:01")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--confirm", result.stderr)
+
+    def test_inspect_json_preserves_cleanup_metadata_and_exit_status(self):
+        from btdos import probe
+        for status, expected in (("completed", 0), ("no_results", 0), ("failed", 1), ("interrupted", 130)):
+            with self.subTest(status=status):
+                result = probe.ProbeResult("02:00:00:00:00:01", "hci1", "bredr", status=status,
+                    cleanup_status="unconfirmed", warnings=["SYNTHETIC cleanup"], metadata={"Name": "SYNTHETIC"})
+                with patch.object(probe, "probe_device", return_value=result) as collect, patch("builtins.print") as output:
+                    code = app_cli.main(["inspect", "--transport", "bredr", "--adapter", "hci1",
+                        "--target", result.target, "--confirm", result.target, "--json"])
+                self.assertEqual(code, expected)
+                collect.assert_called_once_with("bredr", result.target, adapter="hci1", local_address=None)
+                output.assert_called_once()
+                payload = json.loads(output.call_args.args[0])
+                self.assertEqual(payload["cleanup_status"], "unconfirmed")
+                self.assertEqual(payload["status"], status)
+                self.assertEqual(payload["metadata"]["Name"], "SYNTHETIC")
+
 
 if __name__ == "__main__":
     unittest.main()

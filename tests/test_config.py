@@ -3,7 +3,7 @@
 import math
 import unittest
 
-from btdos.config import Plan
+from btdos.config import Plan, budget_defaults
 
 
 def valid_plan(**changes):
@@ -28,7 +28,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(values["rate"], 1)
         self.assertEqual(values["approved_rate"], 1)
         self.assertEqual(values["duration"], 10)
-        self.assertEqual(values["max_ops"], 400)
+        self.assertEqual(values["max_ops"], 10)
         self.assertEqual(values["cycles"], 5)
         self.assertEqual(values["hold"], 2)
         self.assertEqual(values["gap"], 3)
@@ -54,6 +54,23 @@ class PlanTests(unittest.TestCase):
                 with self.subTest(field=field, value=value):
                     plan = Plan.from_dict(valid_plan(approved_rate=20, **{field: value}))
                     plan.validate()
+
+    def test_budget_defaults_are_independent_copies_and_quick_is_five_operations(self):
+        default = budget_defaults()
+        quick = budget_defaults(quick=True)
+        self.assertEqual(default["max_ops"], 10)
+        self.assertEqual(quick["max_ops"], 5)
+        self.assertEqual(quick["duration"], 5)
+        default["max_ops"] = 400
+        quick["duration"] = 60
+        self.assertEqual(budget_defaults()["max_ops"], 10)
+        self.assertEqual(budget_defaults(quick=True)["duration"], 5)
+
+    def test_existing_explicit_400_operation_plan_remains_supported(self):
+        plan = Plan.from_dict(valid_plan(max_ops=400))
+        plan.validate()
+        self.assertEqual(plan.max_ops, 400)
+        self.assertEqual(Plan.from_dict(plan.to_dict()).max_ops, 400)
 
     def test_numeric_out_of_bounds(self):
         invalid = {
