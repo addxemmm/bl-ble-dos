@@ -6,8 +6,8 @@
 
 | 环境 / 项目 | 验证范围 | 结果 |
 | --- | --- | --- |
-| Windows / Python 3.14.7 | 241项单元、CLI、安装、交互及故障回归；其中32项POSIX/权限/管道相关测试条件跳过 | 通过 |
-| Kali / Python 3.13.12 | 241项完整测试；1项Windows编码专用测试条件跳过；含真实Linux进程生命周期与管道清理测试 | 通过 |
+| Windows / Python 3.14.7 | 242项单元、CLI、安装、交互及故障回归；其中33项POSIX/权限/管道相关测试条件跳过 | 通过 |
+| Kali / Python 3.13.12 | 242项完整测试；1项Windows编码专用测试条件跳过；含真实Linux进程生命周期与管道清理测试 | 通过 |
 | Kali / Python 3.13.12 | 在项目内创建venv、可编辑安装、依赖一致性检查 | 通过 |
 | Kali安装 / 0.3.0 | `install.sh --help`、Bash语法检查、`--non-interactive`复用现有venv并安装新依赖 | 通过；未运行apt或修改蓝牙配置 |
 | Kali输入 / 0.3.0 | 8项真实pipe输入测试；另在真实PTY编辑合成MAC（←、Delete），↑↓/回车选择菜单 | 通过；正确值无转义泄漏 |
@@ -45,6 +45,8 @@ HCI采集验证仅读取本机控制器信息，不扫描、不连接车端、�
 修复后，通过普通用户exec shim建立独立PGID但保留控制TTY；监督器核实PGID/SID后才按组发送信号。实现不使用`preexec_fn`、不传密码、不修改sudoers或sudo时间戳策略。无有效认证时仍拒绝启动负载。
 
 0.3.0 真实Linux管道回归还发现：子进程忽略SIGTERM且stdout超量时，只等待进程而不继续排空PIPE会导致清理超时。现先终止旧读协程，以丢弃式读协程排空管道，再按有限terminate/kill预算回收；持续管道错误仍返回清理未确认，不伪报成功。
+
+Python 3.10 CI曾暴露测试替身差异：在子Task中直接抛KeyboardInterrupt会退出简化事件循环，不等同于公共入口的真实SIGINT。现将协程取消与进程信号分层验证：保留CancelledError和outer-runner状态测试，新增真实Linux子进程SIGINT经`probe_device()`/`asyncio.run()`取消并清理的回归；无硬件访问，不跳过3.10。
 
 ## 自动化验证边界
 

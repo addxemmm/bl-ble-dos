@@ -1,5 +1,7 @@
 """Synthetic capability probes: never touch a bus, controller, or socket."""
 import asyncio
+import json
+import subprocess
 import sys
 import time
 from contextlib import nullcontext
@@ -245,8 +247,11 @@ class ProbeTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 self.assertEqual(self.probe(**kwargs).status, "failed")
 
-    def test_connect_error_or_cancellation_disconnects_owned_client(self):
-        for error in (RuntimeError("denied"), asyncio.CancelledError(), KeyboardInterrupt()):
+    def test_connect_error_or_cancellation_disconnects_attempted_client(self):
+        # Coroutine cancellation and process SIGINT are different layers.
+        # On Python 3.10 a Task-raised KeyboardInterrupt exits the test loop;
+        # actual SIGINT through the public runner is covered below instead.
+        for error in (RuntimeError("denied"), asyncio.CancelledError()):
             ble = FakeBLE(fail={"connect": error})
             result = self.probe(ble=ble)
             self.assertEqual(result.status, "failed" if isinstance(error, Exception) else "interrupted")
@@ -430,6 +435,46 @@ class ProbeTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Real Linux subprocess pipe lifecycle")
 class RealProbeProcessTests(unittest.TestCase):
+    def test_real_sigint_public_entry_drains_attempted_client(self):
+        source = r'''
+import asyncio, json, os, signal
+from contextlib import nullcontext
+from types import SimpleNamespace
+from btdos import probe as p
+target = '02:00:00:00:00:01'
+calls = []
+class Client:
+    is_connected = False
+    async def connect(self):
+        calls.append('connect')
+        self.is_connected = True
+        asyncio.get_running_loop().call_later(.05, lambda: os.kill(os.getpid(), signal.SIGINT))
+        await asyncio.Event().wait()
+    async def disconnect(self):
+        calls.append('disconnect')
+        self.is_connected = False
+client = Client()
+async def snapshot(*args, **kwargs):
+    return '02:00:00:00:00:02'
+async def find(*args):
+    return SimpleNamespace(address=target, details={'path':'/org/bluez/hci0/dev_02_00_00_00_00_01'})
+p._snapshot = snapshot
+p._find_ble = find
+p._new_ble_client = lambda *args: client
+p.adapter_lock = lambda *args: nullcontext()
+result = p.probe_device('le', target)
+print(json.dumps({'status':result.status, 'cleanup_status':result.cleanup_status,
+                  'calls':calls, 'connected':client.is_connected}))
+'''
+        result = subprocess.run([sys.executable, "-c", source], capture_output=True,
+                                text=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(json.loads(result.stdout), dict(status="interrupted", cleanup_status="released",
+                                                        calls=["connect", "disconnect"], connected=False))
+        self.assertNotIn("never awaited", result.stderr)
+        self.assertNotIn("Task was destroyed", result.stderr)
+        self.assertNotIn("exception was never retrieved", result.stderr)
+
     def test_oversize_stdout_is_drained_and_process_reaped(self):
         processes = []
         create = asyncio.create_subprocess_exec
