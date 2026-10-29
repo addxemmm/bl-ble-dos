@@ -1,0 +1,193 @@
+# 安装与使用
+
+[返回首页](../README.md) · [硬件](hardware.md) · [证据](evidence.md)
+
+## 1. 安装
+
+运行环境为 Linux（面向 Ubuntu / Kali）、Python 3.10+、Bash 和 BlueZ。Windows 可用于源码与发布管理。先安装系统依赖，再安装项目；系统包安装会请求管理员权限。
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-pip bluez
+chmod +x bt-dos scripts/install.sh
+./scripts/install.sh
+./bt-dos doctor
+```
+
+`install.sh` 在仓库内建立 `.venv`，使用 `pip install -e .` 安装项目；日常使用 `./bt-dos`，无需手动激活环境。`./scripts/install.sh --dev` 在安装后运行单元测试。系统工具缺失、适配器不可用和权限问题以 `doctor` 的实际输出为准，不以安装成功代替运行环境就绪。
+
+### 从 Windows 部署已提交源码
+
+在 Windows PowerShell 中可使用项目脚本部署到 Linux：
+
+```powershell
+.\scripts\deploy.ps1 -HostName HOST -UserName USER -RemotePath /home/USER/workspace/bl_ble_dos
+```
+
+替换占位符并先确认远程目录用于本项目。脚本通过 SSH/SCP 传输 Git `HEAD` 的源码归档，执行远程安装、单元测试和 `doctor --json`；不会自动发起无线测试。需要已有提交且无已跟踪的未提交变更，未跟踪文件不在归档中。它不是发布或硬件验证；实际运行仍在 Linux 终端完成。
+
+## 2. 先运行离线演示
+
+```bash
+./bt-dos demo --output runs/demo
+# 将 RUN_DIR 替换为上一步打印的实际子目录
+./bt-dos report RUN_DIR
+./bt-dos verify RUN_DIR
+```
+
+`--output` 是父目录而不是最终证据目录：每次在其下创建新的时间戳/随机子目录，终端会打印实际路径、报告位置和可直接复制的校验命令。不要对父目录直接运行 `verify`。
+
+`demo` 不扫描、不连接、不调用无线采集，也不需要蓝牙硬件。它保存带 `simulation` 标识的计划、合成事件、报告和清单，不伪造 `host-hci.btsnoop` 或 `air.pcap`。它用于检查交付流程和界面，不证明任何硬件能力。
+
+## 3. 交互向导
+
+```bash
+./bt-dos
+# 或
+./bt-dos wizard
+```
+
+向导在终端中显示环境与选项，引导选择场景、适配器、目标、参数和输出。确认前应核对目标地址、实验隔离、停止条件及恢复方法。计划写入本次新运行目录的 `plan.json`，不建立长期保存车辆信息的项目配置。
+
+无参数入口要求交互式终端；输入或输出被重定向时显示帮助，不进入询问。窄终端由 Rich 自动适配。关闭颜色使用标准环境变量，不是 `--no-color` 参数：
+
+```bash
+NO_COLOR=1 ./bt-dos doctor
+```
+
+真实运行前以普通用户刷新 sudo 凭证：
+
+```bash
+sudo -v
+./bt-dos
+```
+
+仅 `btmon` 子进程使用 `sudo -n`，不会在后台等待密码输入。不要用 `sudo ./bt-dos` 启动整个向导；项目不自动添加 sudoers、修改 capabilities 或调整系统安全策略。
+
+## 4. 诊断、枚举与发现
+
+```bash
+./bt-dos doctor
+./bt-dos doctor --json
+./bt-dos adapters
+./bt-dos scan --transport le --adapter hci0 --seconds 5
+./bt-dos scan --transport bredr --adapter hci0 --seconds 5
+./bt-dos ble-info --target TARGET --adapter hci0
+```
+
+`hci0` 是适配器示例，按枚举结果替换；`TARGET` 是被测蓝牙地址占位符。扫描和 GATT 信息查询是实际无线操作。发现列表不保证完整：目标可发现状态、BLE 地址类型、隐私地址和 USB 直通均会影响结果。`ble-info` 用于确认可读特征和 UUID，已配对目标的访问策略仍由 BlueZ 与目标决定。
+
+## 5. 使用 JSON 计划运行
+
+以下为 `ble-read` 计划结构。保存为 `PLAN.json`，将大写占位符替换为本次实验的真实值后运行。JSON 不支持注释。
+
+```json
+{
+  "schema_version": 1,
+  "case": "ble-read",
+  "adapter": "hci0",
+  "target": "TARGET",
+  "characteristic": "CHARACTERISTIC_UUID",
+  "sdp_uuid16": 4363,
+  "rate": 1,
+  "approved_rate": 1,
+  "duration": 10,
+  "max_ops": 400,
+  "cycles": 5,
+  "hold": 2,
+  "gap": 3,
+  "baseline": 5,
+  "recovery": 10,
+  "capture": "hci",
+  "output_root": "runs",
+  "external_business_probe": false,
+  "external_ecu_observation": false
+}
+```
+
+```bash
+sudo -v
+./bt-dos run --plan PLAN.json --confirm TARGET
+```
+
+`--confirm` 必须与计划目标一致。程序先校验计划，再创建运行快照、启动采集并等待就绪，之后才启动 worker。请求型场景到达持续时间或操作数上限时结束，不因配置了较大 `max_ops` 而延长请求窗口。信道/连接循环以循环次数、保持/间隔和监督超时为边界，不以 `duration` 作为总时长；连接准备与基线/恢复也会增加全程时长。基线与恢复窗口用于限定前后观察时间，不自动提供外部业务监测。
+
+### 参数参考
+
+| 字段 | 默认值 / 取值 | 说明 |
+| --- | --- | --- |
+| `schema_version` | `1` | 计划格式版本 |
+| `case` | 四个场景之一 | `br-sdp`、`br-channel`、`ble-read`、`ble-cycle` |
+| `adapter` | 如 `hci0` | 本次使用的 Linux 蓝牙适配器 |
+| `target` | 必填地址 | 本次目标，需与确认值匹配 |
+| `local_address` | BR/EDR 必填 | 对应所选本地适配器的蓝牙地址；不是目标地址 |
+| `characteristic` | `ble-read` 必填 | 已确认可读的完整 GATT 特征 UUID，或 `0xHANDLE` 形式句柄 |
+| `sdp_uuid16` | `4363`（`0x110B`） | SDP 查询使用的 16 位服务 UUID 整数；按目标服务设置 |
+| `rate` | `1`，范围 `0.1–20` | 请求速率，单位 req/s；不等于空口 PPS |
+| `approved_rate` | `1` | 本次实验明确接受的请求速率上界；`rate` 应不高于此值，项目仍限制实际配置速率不超过 20 |
+| `duration` | `10`，范围 `1–60` | 请求型场景负载窗口秒数，不包含全部前后准备时间 |
+| `max_ops` | `400`，范围 `1–400` | 请求型场景操作次数上限，不保证一定达到 |
+| `cycles` | `5`，最高 `10` | 顺序连接循环上限 |
+| `hold` | `2`，范围 `1–5` | 每轮连接保持秒数 |
+| `gap` | `3`，范围 `3–30` | 循环之间间隔秒数 |
+| `baseline` | `5`，范围 `0–60` | 负载前观察窗口秒数 |
+| `recovery` | `10`，范围 `0–120` | 负载后恢复观察窗口秒数 |
+| `capture` | `hci` / `hci+nrf` | HCI 必选；nRF 是额外 BLE 空口采集 |
+| `nrf_port` | 如 `/dev/ttyACM0` | 选择 `hci+nrf` 时所需的 sniffer 串口 |
+| `output_root` | `runs` | 新运行目录的父目录 |
+| `external_business_probe` | `false` | 外部业务探针声明；单凭此字段不构成证据 |
+| `external_ecu_observation` | `false` | 外部 ECU 观察声明；单凭此字段不构成证据 |
+
+`approved_rate` 是试验预算字段，不是身份认证或访问权限机制；填写较大的预算也不会提升项目的 20 req/s 配置上限。
+
+未用于当前场景的参数不会把该场景扩展为另一种测试。例如 `cycles` 不会让 `br-channel` 变成 ACL 链路循环；`rate` 也不保证 BLE 连接循环每秒完成相同次数。目标应答、连接时延和主机调度可能降低实际负载。
+
+### BR/EDR 计划差异
+
+将 `case` 改为 `br-sdp` 或 `br-channel`，添加 `"local_address": "LOCAL_ADDRESS"`，并删除 BLE 特征字段。运行前核对本地地址确实属于计划里的 `adapter`。`br-sdp` 的目标应支持所选服务 UUID；服务缺失与设备失去可用性是不同结论。
+
+`br-channel` 固定使用 SDP 的 PSM `0x0001`，只建立、保持和关闭 L2CAP 信道，不发送业务负载，不开放任意 PSM 配置。控制器可能保留底层 ACL，因此观察到本地信道关闭不等于目标 ACL 已断开。`br-sdp` 当前是首响应页查询；遇到正常 SDP continuation 时停止并标记未完成，不应把分页当成目标故障或完整服务枚举。
+
+### 可选 BLE 空口采集
+
+BLE 计划使用 `"capture": "hci+nrf"`，并添加 `"nrf_port": "/dev/ttyACM0"`。需提前安装 Nordic `nrfutil` / `ble-sniffer` 并独立完成 sniffer 固件准备；本项目不刷写设备固件。
+
+监督进程使用的接口形态：
+
+```bash
+nrfutil ble-sniffer sniff --port PORT --follow TARGET --output-pcap-file PATH
+```
+
+`PORT`、`TARGET`、`PATH` 是占位符。nrfutil 的接口超时参数不代表总录制时长；生命周期由本项目的监督进程控制。项目命令行不传入配对密钥。详情见[硬件指南](hardware.md#可选nrf52840-ble-sniffer)。
+
+## 6. 停止、报告与复核
+
+需要中止时按 `Ctrl+C`。程序应停止 worker 和采集子进程，并将已取得的数据与中止原因保留在运行目录。若目标业务异常，按实验停止条件处置；不要以追加负载代替故障调查。
+
+采集写入进程退出未确认时生成 `UNSEALED.json`，不生成完整性清单；已确认退出但使用强制清理时记录 `cleanup_forced`，不作为自动成功。详情见[清理与未封存状态](evidence.md#清理与未封存状态)。
+
+```bash
+./bt-dos report RUN_DIR
+./bt-dos verify RUN_DIR
+```
+
+`report` 先检查完整性，再显示已封存的 Markdown 报告，不改写证据包；若清单不一致会警告并退出 `1`。`verify` 校验清单及其引用文件并列出完整性差异。解释参见[证据指南](evidence.md)。
+
+| 命令 / 结果 | 退出码 | 含义 |
+| --- | --- | --- |
+| `run` 完成 | `0` | 脚本流程完成，不代表合规 PASS |
+| `run` 运行失败 | `1` | 环境、采集或执行失败，查看事件与报告 |
+| `run` 用户停止 | `130` | 中止运行；已保存内容仍需按完整性检查 |
+| `verify` 清单一致 | `0` | 文件与清单一致 |
+| `verify` 缺失 / 损坏 / 不一致 | `1` | 需保留原始目录并调查差异 |
+
+证据不足不是自动的“DoS 失败”或“合规 FAIL”；请求返回成功也不是自动 PASS。
+
+## 常见问题
+
+- **找不到 `btmon`**：确认安装了系统 BlueZ 工具，查看 `doctor` 的路径检测。
+- **`sudo -n` 失败**：在同一会话先运行 `sudo -v`，然后重新运行；不自动放宽系统权限。
+- **没有适配器**：检查 `rfkill`、Bluetooth 服务及 USB 直通；参见硬件指南。
+- **GATT 读取被拒绝**：确认特征的 read 属性及目标配对/加密要求，不将访问拒绝等同于目标故障。
+- **空口文件为空或跟随失败**：核对串口、固件、当前目标地址和采集开始时机；文件存在不等于捕获完整。
+- **退出成功但结论不充分**：查看证据缺口；项目只对现有观察作结论，不补造业务或 ECU 数据。

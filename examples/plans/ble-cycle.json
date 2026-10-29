@@ -1,0 +1,23 @@
+{
+  "case": "ble-cycle",
+  "adapter": "hci0",
+  "target": "TARGET",
+  "local_address": null,
+  "characteristic": null,
+  "sdp_uuid16": 4363,
+  "rate": 1.0,
+  "approved_rate": 1.0,
+  "duration": 10.0,
+  "max_ops": 400,
+  "cycles": 5,
+  "hold": 2.0,
+  "gap": 3.0,
+  "baseline": 5.0,
+  "recovery": 10.0,
+  "capture": "hci",
+  "nrf_port": null,
+  "output_root": "runs",
+  "external_business_probe": false,
+  "external_ecu_observation": false,
+  "schema_version": 1
+}
