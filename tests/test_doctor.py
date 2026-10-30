@@ -1,5 +1,6 @@
 """Read-only diagnostics do not require installed Bluetooth tools or adapters."""
 
+from copy import deepcopy
 import subprocess
 from pathlib import Path
 import unittest
@@ -115,6 +116,74 @@ class DoctorTests(unittest.TestCase):
         selected = {"adapter": "hci0", "address": "02:00:00:00:00:02", "supported_settings": "br/edr le"}
         with patch("btdos.doctor.adapters", return_value=[selected]):
             self.assertEqual(inspect_plan_adapter(self.plan()), selected)
+
+    def test_shared_snapshot_avoids_enumeration_and_is_isolated(self):
+        controllers = [{"adapter": "hci0", "address": "02:00:00:00:00:02",
+                        "supported_settings": "br/edr le", "details": {"sources": ["fixture"]}}]
+        original = deepcopy(controllers)
+        with patch("btdos.doctor.adapters", side_effect=AssertionError("unexpected enumeration")), \
+                patch("btdos.doctor.sys.platform", "win32"), \
+                patch("btdos.doctor.shutil.which", return_value=None), \
+                patch("btdos.doctor.command", return_value={"code": 0, "stdout": "", "stderr": ""}):
+            selected = inspect_plan_adapter(self.plan(), controllers=controllers)
+            result = diagnose(controllers=controllers)
+        self.assertEqual(selected, original[0])
+        self.assertEqual(result["adapters"], original)
+        self.assertEqual(controllers, original)
+        # Returned values must not let later caller edits mutate the shared snapshot.
+        selected["details"]["sources"].append("selected")
+        result["adapters"][0]["details"]["sources"].append("diagnostic")
+        result["adapters"].append({"adapter": "hci1"})
+        self.assertEqual(controllers, original)
+        self.assertEqual(selected["details"]["sources"], ["fixture", "selected"])
+
+    def test_empty_snapshot_does_not_enumerate(self):
+        controllers = []
+        with patch("btdos.doctor.adapters", side_effect=AssertionError("unexpected enumeration")), \
+                patch("btdos.doctor.sys.platform", "win32"), \
+                patch("btdos.doctor.shutil.which", return_value=None), \
+                patch("btdos.doctor.command", return_value={"code": 0, "stdout": "", "stderr": ""}):
+            with self.assertRaises(RuntimeError):
+                inspect_plan_adapter(self.plan(), controllers=controllers)
+            result = diagnose(controllers=controllers)
+        self.assertEqual(result["adapters"], [])
+        self.assertFalse(result["ready_for_live"])
+        self.assertEqual(controllers, [])
+
+    def test_snapshot_preserves_controller_validation(self):
+        cases = [
+            {"adapter": "hci1", "address": "02:00:00:00:00:02", "supported_settings": "br/edr le"},
+            {"adapter": "hci0", "address": "02:00:00:00:00:03", "supported_settings": "br/edr le"},
+            {"adapter": "hci0", "address": None, "supported_settings": "br/edr le"},
+            {"adapter": "hci0", "address": "02:00:00:00:00:02", "supported_settings": "le"},
+        ]
+        for selected in cases:
+            with self.subTest(selected=selected):
+                controllers = [selected]
+                original = deepcopy(controllers)
+                with patch("btdos.doctor.adapters", side_effect=AssertionError("unexpected enumeration")):
+                    with self.assertRaises(RuntimeError):
+                        inspect_plan_adapter(self.plan(), controllers=controllers)
+                self.assertEqual(controllers, original)
+
+    def test_snapshot_preserves_le_capability_validation(self):
+        controllers = [{"adapter": "hci0", "address": "02:00:00:00:00:02",
+                        "supported_settings": "br/edr"}]
+        with patch("btdos.doctor.adapters", side_effect=AssertionError("unexpected enumeration")):
+            with self.assertRaises(RuntimeError):
+                inspect_plan_adapter(self.plan(case="ble-cycle"), controllers=controllers)
+
+    def test_default_and_explicit_none_still_enumerate(self):
+        controllers = [{"adapter": "hci0", "address": "02:00:00:00:00:02",
+                        "supported_settings": "br/edr le"}]
+        with patch("btdos.doctor.adapters", return_value=controllers) as enumerate_adapters, \
+                patch("btdos.doctor.sys.platform", "win32"), \
+                patch("btdos.doctor.shutil.which", return_value=None), \
+                patch("btdos.doctor.command", return_value={"code": 0, "stdout": "", "stderr": ""}):
+            for kwargs in ({}, {"controllers": None}):
+                self.assertEqual(diagnose(**kwargs)["adapters"], controllers)
+                self.assertEqual(inspect_plan_adapter(self.plan(), **kwargs), controllers[0])
+        self.assertEqual(enumerate_adapters.call_count, 4)
 
 
 if __name__ == "__main__":

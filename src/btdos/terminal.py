@@ -1,9 +1,85 @@
 """Terminal input adapter: editable fields and arrow-key menus, memory only."""
 import os
+import select
 import sys
 
 from rich.prompt import Prompt as SimplePrompt
 from rich.text import Text
+
+
+def ready_tty(console):
+    """Readiness is available even with the simple TTY prompt backend."""
+    return (sys.platform == "linux" and console.is_terminal
+            and sys.stdin.isatty() and sys.stdout.isatty())
+
+
+class ReadyInput:
+    """Canonical, nonblocking stdin polling; no threads or terminal-mode changes.
+
+    Call start immediately *before* displaying the readiness prompt. Flushing
+    here (not in poll) discards old wizard input without losing a fresh answer.
+    """
+
+    def __init__(self, stream=None):
+        self.stream = sys.stdin if stream is None else stream
+        self.fd = None
+        self.started = False
+        self.buffer = b""
+        self.result = None
+
+    def __enter__(self):
+        if not self.stream.isatty():
+            raise ValueError("readiness input requires a TTY")
+        self.fd = self.stream.fileno()
+        self.was_blocking = os.get_blocking(self.fd)
+        os.set_blocking(self.fd, False)
+        return self
+
+    def start(self):
+        if not self.started:
+            import termios
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+            self.buffer = b""
+            self.started = True
+
+    def poll(self):
+        if self.result is not None:
+            return self.result
+        if not self.started:
+            return None
+        if not select.select([self.fd], [], [], 0)[0]:
+            return None
+        try:
+            chunk = os.read(self.fd, 4096)
+        except BlockingIOError:
+            return None
+        if not chunk:
+            self.result = "cancel"
+            return self.result
+        self.buffer += chunk
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            answer = line.strip().lower()
+            if answer in (b"", b"r"):
+                self.result = "ready"
+            elif answer == b"q":
+                self.result = "cancel"
+            if self.result is not None:
+                return self.result
+        # Bound invalid/partial input; never store it in prompt history.
+        self.buffer = self.buffer[-4096:]
+        return None
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            if self.started:
+                import termios
+                termios.tcflush(self.fd, termios.TCIFLUSH)
+        finally:
+            os.set_blocking(self.fd, self.was_blocking)
+            self.fd = None
+            self.buffer = b""
+        return False
 
 
 def interactive(console):

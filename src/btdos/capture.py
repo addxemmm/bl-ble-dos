@@ -1,5 +1,6 @@
 """Fixed-argv capture adapters; no arbitrary privileged command interface."""
 import os
+import math
 from pathlib import Path
 import shutil
 import signal
@@ -212,10 +213,15 @@ class CaptureProcess:
                     remaining_pids=self.remaining_descendants() if sys.platform == "linux" else [])
 
 
-def build_captures(plan, folder):
+def build_captures(plan, folder, *, wall_budget=None):
+    # The optional manual-ready window is included by the supervisor. The
+    # worker budget and serialized plan remain unchanged.
+    effective_budget = plan.wall_budget if wall_budget is None else wall_budget
+    if type(effective_budget) not in (int, float) or not math.isfinite(effective_budget) or effective_budget <= 0:
+        raise ValueError("capture wall budget must be finite and positive")
     timeout = system_binary("timeout")
     btmon = system_binary("btmon")
-    budget = str(plan.wall_budget + 15) + "s"
+    budget = str(effective_budget + 15) + "s"
     base = [timeout, "--signal=INT", "--kill-after=3s", budget, btmon,
             "-i", plan.adapter, "-w", str(folder / "host-hci.btsnoop")]
     if os.geteuid() != 0:

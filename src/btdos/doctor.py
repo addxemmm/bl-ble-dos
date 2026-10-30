@@ -1,4 +1,5 @@
 """Read-only diagnostics with bounded external commands."""
+from copy import deepcopy
 import os
 from pathlib import Path
 import platform
@@ -59,11 +60,12 @@ def adapters():
     return result
 
 
-def diagnose():
+def diagnose(controllers=None):
+    """Collect diagnostics, optionally reusing an isolated controller snapshot."""
     tools = {name: shutil.which(name) for name in
              ("btmon", "btmgmt", "bluetoothctl", "sdptool", "tshark", "timeout", "sudo", "nrfutil")}
     service = command(["systemctl", "is-active", "bluetooth"], timeout=2) if sys.platform == "linux" else dict(stdout="not_linux", code=-1)
-    controllers = adapters()
+    controllers = deepcopy(adapters() if controllers is None else controllers)
     versions = {}
     for name in ("bluetoothctl", "btmon", "tshark", "nrfutil"):
         if tools.get(name):
@@ -95,8 +97,9 @@ def diagnose():
                 note="ready_for_live只是初步环境检查，实际能力/权限/采集就绪仍需run阶段验证；不代表目标或硬件用例验证通过")
 
 
-def inspect_plan_adapter(plan):
-    choices = adapters()
+def inspect_plan_adapter(plan, controllers=None):
+    """Validate a selected controller, enumerating only when no snapshot is given."""
+    choices = deepcopy(adapters() if controllers is None else controllers)
     selected = next((item for item in choices if item["adapter"] == plan.adapter), None)
     if selected is None:
         raise RuntimeError(f"{plan.adapter} 未发现；虚拟机请先直通USB蓝牙设备")

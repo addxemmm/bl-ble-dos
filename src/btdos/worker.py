@@ -35,6 +35,10 @@ def main():
     args = SimpleNamespace(target=plan.target, local=plan.local_address,
                            adapter=plan.adapter, uuid16=plan.sdp_uuid16,
                            char=plan.characteristic, rate=plan.rate,
+                           service_uuid=plan.service_uuid, write_test_confirmed=plan.write_test_confirmed,
+                           ble_interval_ms=plan.ble_interval_ms,
+                           baseline=plan.baseline, recovery=plan.recovery,
+                           parameter_rpc_dir=str(Path(opts.stop_file).parent),
                            seconds=plan.duration, max_ops=plan.max_ops,
                            cycles=plan.cycles, hold=plan.hold, gap=plan.gap,
                            stop_file=opts.stop_file, parent_pid=opts.parent_pid)
@@ -50,7 +54,8 @@ def main():
             cases.br_channel(args)
         else:
             import asyncio
-            asyncio.run({"ble-read": cases.ble_read, "ble-cycle": cases.ble_cycle}[plan.case](args))
+            asyncio.run({"ble-read": cases.ble_read, "ble-cycle": cases.ble_cycle,
+                         "ble-write-command": cases.ble_write_command}[plan.case](args))
         cases.log("worker_end", status="completed")
         return 0
     except cases.IncompleteSDP as exc:

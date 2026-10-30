@@ -18,6 +18,10 @@ class SupervisorTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Supervision tests use explicit fixtures, never enumerate host radios.
+        enumerator = patch("btdos.supervisor.adapters", return_value=[])
+        enumerator.start()
+        self.addCleanup(enumerator.stop)
 
     def plan(self):
         return Plan.from_dict({

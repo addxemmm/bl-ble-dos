@@ -16,10 +16,12 @@ Ubuntu / Kali 安装引导（Python 3.10+）。
   --dev              安装后运行离线单元测试
 
 默认只检查系统、创建/复用项目 .venv，并通过 pip 联网安装项目依赖。
+最后执行 pip check 与 CLI --version 的离线软件验证；安装成功不等于蓝牙环境就绪。
 默认不执行 apt，不修改 sudoers、文件 capabilities 或蓝牙系统配置。
 请使用普通用户运行；仅 --install-system 的 apt 步骤使用 sudo。
 系统依赖：sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip bluez
 可选的 tshark 不在自动安装范围内，避免其 debconf 权限问答。
+本脚本不运行 doctor、扫描或服务操作；环境准备见 docs/installation.md。
 HELP
 }
 
@@ -78,7 +80,7 @@ python3 -c 'import sys; print("Python:", sys.version.split()[0]); sys.exit(0 if 
   system_hint; fail '需要 Python >=3.10；请安装受支持版本后，让 python3 指向该版本再重试。'
 }
 missing_tools=()
-for tool in bluetoothctl btmon; do
+for tool in bluetoothctl btmon btmgmt sdptool; do
   if command -v "$tool" >/dev/null 2>&1; then
     printf '已找到 BlueZ 工具：%s\n' "$tool"
   else
@@ -88,6 +90,23 @@ done
 if (( ${#missing_tools[@]} )); then
   printf '[提示] 缺少 BlueZ 工具：%s；仍可安装和运行离线演示。\n' "${missing_tools[*]}"
   system_hint
+fi
+if command -v timeout >/dev/null 2>&1; then
+  printf '已找到 timeout；live 需要 GNU coreutils 实现（这里只检查命令存在）。\n'
+else
+  printf '[提示] 缺少 GNU timeout：live 外部命令预算需要它；仍可安装和运行离线演示。\n'
+fi
+if ! command -v sudo >/dev/null 2>&1; then
+  printf '[提示] 缺少 sudo：普通用户 live 抓包需要按主机策略准备权限；仍可运行离线演示。请参阅 docs/installation.md，不要改用 root 向导。\n'
+fi
+if ! command -v tshark >/dev/null 2>&1; then
+  printf '[提示] 可选 tshark 未找到：仅影响抓包索引/解码，不自动安装。\n'
+fi
+if ! command -v nrfutil >/dev/null 2>&1; then
+  printf '[提示] 可选 nrfutil 未找到：仅额外 BLE sniffer 需要，不影响 HCI 抓包。\n'
+fi
+if ! command -v hcitool >/dev/null 2>&1; then
+  printf '[提示] 可选 hcitool 未找到：显式 BLE 连接间隔 helper 需要它；保留默认 BLE 连接参数即可。\n'
 fi
 
 step 3 '准备项目虚拟环境（不使用 sudo）'
@@ -117,12 +136,30 @@ step 5 '设备与虚拟机检查提示（不扫描、不连接无线设备）'
 printf 'USB 蓝牙适配器须由当前 Linux 系统识别；虚拟机中请将 USB 蓝牙适配器直通到客户机，而非仅连接宿主机蓝牙。\n'
 printf '后续 doctor 会检查工具、权限和适配器状态；本安装脚本不启动蓝牙服务、不扫描、不连接、不运行负载。\n'
 
-step 6 '验证与下一步'
+step 6 '离线软件验证与下一步（不验证蓝牙就绪）'
+if ! "$PYTHON" -m pip check; then
+  printf '修复命令：%q -m pip install -e %q\n' "$PYTHON" "$ROOT" >&2
+  printf '验证命令：%q -m pip check\n' "$PYTHON" >&2
+  fail 'Python 依赖一致性检查失败；检查上方冲突/缺项，在项目虚拟环境修复后重新运行安装脚本。'
+fi
+if ! "$PYTHON" -m btdos --version; then
+  printf '修复命令：%q -m pip install -e %q\n' "$PYTHON" "$ROOT" >&2
+  printf '验证命令：%q -m btdos --version\n' "$PYTHON" >&2
+  fail 'CLI 入口验证失败；检查上方导入/安装错误，修复后重新运行安装脚本。'
+fi
 if (( DEV )); then
   printf '运行离线单元测试（--dev）。\n'
   (cd "$ROOT"; "$PYTHON" -m unittest discover -s tests -v) || fail '离线测试失败；检查上方失败用例输出。'
 fi
-printf '\n安装完成。请以普通用户运行以下绝对路径命令：\n'
+printf '\n软件安装完成：依赖一致性与 CLI 入口验证通过；蓝牙环境尚未验证。\n'
+printf '请以普通用户按顺序执行（以下命令仅显示，不自动运行）：\n'
+printf '1. 无需适配器的软件/证据流程：\n'
+printf '  %q --version\n' "$ROOT/bt-dos"
+printf '  %q demo --output %q\n' "$ROOT/bt-dos" "$ROOT/runs/demo"
+printf '  %q verify RUN_DIR  # RUN_DIR 为 demo 打印的实际子目录，不是父目录\n' "$ROOT/bt-dos"
+printf '2. 只读蓝牙环境检查（可能调用管理接口，不扫描、不连接）：\n'
 printf '  %q doctor\n' "$ROOT/bt-dos"
+printf '  %q adapters\n' "$ROOT/bt-dos"
+printf '3. 处理环境缺项后进入交互向导：\n'
 printf '  %q wizard\n' "$ROOT/bt-dos"
-printf 'doctor 的缺项提示需处理后再进行实际设备操作；安装成功不代表蓝牙环境已就绪。\n'
+printf '服务未运行、rfkill 或适配器电源问题请先按 docs/installation.md 手动准备；本脚本不启动服务。\n'

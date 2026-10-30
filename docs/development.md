@@ -40,14 +40,14 @@ Bash entry → CLI / Rich + prompt_toolkit wizard → validated plan
 
 ## 不变条件
 
-1. 请求速率默认 1 req/s，最高 20，且不高于 `approved_rate`；默认 10 秒 / `max_ops=10`，快速预检 5 秒 / `max_ops=5`。旧计划显式 `max_ops=400` 保持有效。
-2. 请求型负载 `duration` 不超过 60 s、`max_ops` 不超过 400；信道/连接循环不超过 10，hold 为 1–5 s，gap 为 3–30 s，并有监督预算。全程不以 60 s 作为通用上限。
+1. 原四场景请求速率默认 10 req/s，`approved_rate=10`，最高 20，且不高于 `approved_rate`；默认 10 秒 / `max_ops=100`，快速预检保持 1 req/s、`approved_rate=1`、5 秒 / `max_ops=5`。旧计划显式 `max_ops=400` 保持有效。
+2. 原请求型负载 `duration` 不超过 60 s、`max_ops` 不超过 400；信道/连接循环不超过 10，hold 为 1–5 s，gap 为 3–30 s，并有监督预算。第五场景 `ble-write-command` 仅固定fixture、8字节载荷，独立最高100cmd/s、10秒、1000次、8000字节；无任意载荷输入。全程不以 60 s 作为通用上限。
 3. `run` 的显式确认目标应与计划一致；BR/EDR 应记录对应本地适配器地址。
 4. HCI 采集必选，就绪后启动 worker；可选 nRF 不替代 HCI。
-5. 普通用户运行 UI / worker；只为 `btmon` 子进程使用 `sudo -n`。不自动安装 sudoers、不设置 capabilities。
+5. 普通用户运行UI/worker；`btmon`采集子进程使用 `sudo -n`。显式BLE间隔请求由保留TTY的supervisor经内部文件RPC执行限定argv的可选参数helper（`sudo -n`），worker不提权。请求/响应随run封存；helper15秒预算，worker等待最多20秒，cycle每轮分别预留。不自动安装或扩大sudoers、不设置capabilities。
 6. 信号、超时、采集失败与 worker 失败均应触发受控清理，保留已取得的证据。
 7. `demo` 不调用硬件，不生成伪造捕获，显著标识 simulation。
-8. 外部业务/ECU 声明不是观测数据；证据缺口不得变成自动 PASS。
+8. 外部业务/目标系统 声明不是观测数据；证据缺口不得变成自动 PASS。
 9. 不将 `br-channel` 标为 ACL 生命周期压力，不将 `ble-cycle` 标为并发槽位耗尽。
 10. 用户输入不得以 shell 字符串拼接执行；子进程参数与文件边界应独立校验。
 
@@ -77,7 +77,7 @@ Bash entry → CLI / Rich + prompt_toolkit wizard → validated plan
 - Ctrl+C、超时、正常结束的清理与事件完整性；
 - demo 无硬件副作用、报告显著 simulation；
 - 清单缺失、文件缺失、内容篡改与有效包校验；
-- 缺少空口、业务探针和 ECU 数据时的结论边界。
+- 缺少空口、业务探针和目标系统数据时的结论边界。
 
 完整硬件实验需另行执行并保存环境、计划与运行包。测试日志中将“单元测试通过”“demo 校验通过”和“硬件实验通过”分开陈述，不用单元测试替代设备兼容性声明。
 

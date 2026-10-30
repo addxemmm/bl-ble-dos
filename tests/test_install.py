@@ -49,6 +49,12 @@ elif name in ("python", "python3"):
         target.chmod(0o755)
     elif args[:3] == ["-m", "pip", "install"]:
         sys.exit(int(os.environ.get("INSTALL_TEST_PIP_FAIL", "0")))
+    elif args == ["-m", "pip", "check"]:
+        sys.exit(int(os.environ.get("INSTALL_TEST_PIP_CHECK_FAIL", "0")))
+    elif args == ["-m", "btdos", "--version"]:
+        sys.exit(int(os.environ.get("INSTALL_TEST_CLI_FAIL", "0")))
+    elif args == ["-m", "unittest", "discover", "-s", "tests", "-v"]:
+        sys.exit(int(os.environ.get("INSTALL_TEST_TEST_FAIL", "0")))
     elif args and args[0] == "-c":
         code = args[1]
         if "import venv" in code and os.environ.get("INSTALL_TEST_NO_VENV"):
@@ -75,7 +81,9 @@ class InstallerTests(unittest.TestCase):
         (self.root / "bt-dos").write_text("fixture", encoding="utf-8")
         self.log = self.base / "calls.jsonl"
         fake = FAKE_COMMAND.replace("#!PYTHON", "#!" + sys.executable)
-        for name in ("uname", "id", "dirname", "sudo", "apt-get", "python3", "chmod", "bluetoothctl", "btmon"):
+        for name in ("uname", "id", "dirname", "sudo", "apt-get", "python3", "chmod",
+                     "bluetoothctl", "btmon", "btmgmt", "sdptool", "timeout", "tshark", "nrfutil",
+                     "systemctl", "service", "rfkill", "hciconfig", "hcitool"):
             target = self.bin / name
             target.write_text(fake, encoding="utf-8")
             target.chmod(0o755)
@@ -121,10 +129,19 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(str(self.root).replace(" ", "\\ ") + "/bt-dos doctor", result.stdout)
         self.assertIn("/bt-dos wizard", result.stdout)
         self.assertIn(["-m", "pip", "install", "-e", str(self.root)], self.calls("python"))
+        self.assertIn(["-m", "pip", "check"], self.calls("python"))
+        self.assertIn(["-m", "btdos", "--version"], self.calls("python"))
+        self.assertIn("/bt-dos demo --output", result.stdout)
+        self.assertIn("/bt-dos verify RUN_DIR", result.stdout)
+        self.assertIn("/bt-dos adapters", result.stdout)
         self.assertFalse(self.calls("apt-get"))
         self.assertFalse(self.calls("sudo"))
         self.assertFalse(self.calls("bluetoothctl"))
         self.assertFalse(self.calls("btmon"))
+        for name in ("btmgmt", "sdptool", "timeout", "tshark", "nrfutil", "systemctl", "service", "rfkill", "hciconfig", "hcitool"):
+            self.assertFalse(self.calls(name), name)
+        self.assertEqual([args for args in self.calls("python") if args[:2] == ["-m", "btdos"]],
+                         [["-m", "btdos", "--version"]])
 
     def test_repeat_reuses_venv_and_dev_runs_tests(self):
         self.assert_ok(self.run_install())
@@ -185,6 +202,35 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("请勿使用 sudo pip", result.stderr)
         self.assertTrue((self.root / ".venv" / "bin" / "python").exists())
         self.assertNotIn("安装完成", result.stdout)
+        self.assertNotIn(["-m", "pip", "check"], self.calls("python"))
+
+    def test_pip_check_failure_stops_before_cli_and_completion(self):
+        result = self.run_install("--dev", INSTALL_TEST_PIP_CHECK_FAIL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("依赖一致性检查失败", result.stderr)
+        self.assertIn("-m pip check", result.stderr)
+        self.assertIn("-m pip install -e", result.stderr)
+        self.assertNotIn("安装完成", result.stdout)
+        self.assertNotIn(["-m", "btdos", "--version"], self.calls("python"))
+        self.assertFalse(any(args[:2] == ["-m", "unittest"] for args in self.calls("python")))
+        self.assertTrue((self.root / ".venv" / "bin" / "python").exists())
+
+    def test_cli_validation_failure_is_not_reported_as_install_complete(self):
+        result = self.run_install("--dev", INSTALL_TEST_CLI_FAIL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CLI 入口验证失败", result.stderr)
+        self.assertIn("-m btdos --version", result.stderr)
+        self.assertIn(["-m", "pip", "check"], self.calls("python"))
+        self.assertNotIn("安装完成", result.stdout)
+        self.assertFalse(any(args[:2] == ["-m", "unittest"] for args in self.calls("python")))
+        self.assertFalse(self.calls("apt-get"))
+        self.assertFalse(self.calls("sudo"))
+
+    def test_dev_test_failure_is_not_reported_as_install_complete(self):
+        result = self.run_install("--dev", INSTALL_TEST_TEST_FAIL="1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("离线测试失败", result.stderr)
+        self.assertNotIn("安装完成", result.stdout)
 
     def test_incomplete_existing_venv_is_preserved(self):
         (self.root / ".venv").mkdir()
@@ -196,13 +242,41 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(marker.read_text(), "preserve")
 
     def test_missing_bluez_warns_but_allows_offline_install(self):
-        for name in ("btmon", "bluetoothctl"):
+        for name in ("btmon", "bluetoothctl", "btmgmt", "sdptool"):
             (self.bin / name).unlink()
         result = self.run_install()
         self.assert_ok(result)
         self.assertIn("缺少 BlueZ", result.stdout)
         self.assertIn("bluez", result.stderr)
         self.assertFalse(self.calls("apt-get"))
+
+    def test_missing_live_and_optional_tools_does_not_install_or_block_demo(self):
+        for name in ("timeout", "sudo", "tshark", "nrfutil", "hcitool"):
+            (self.bin / name).unlink()
+        result = self.run_install()
+        self.assert_ok(result)
+        self.assertIn("缺少 GNU timeout", result.stdout)
+        self.assertIn("缺少 sudo", result.stdout)
+        self.assertIn("可选 tshark", result.stdout)
+        self.assertIn("可选 nrfutil", result.stdout)
+        self.assertIn("可选 hcitool", result.stdout)
+        self.assertFalse(self.calls("apt-get"))
+        self.assertFalse(self.calls("sudo"))
+
+
+class InstallerStaticTests(unittest.TestCase):
+    def test_offline_validation_uses_fixed_argv(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn('if ! "$PYTHON" -m pip check; then', source)
+        self.assertIn('if ! "$PYTHON" -m btdos --version; then', source)
+        self.assertLess(source.index('"$PYTHON" -m pip check'), source.index('"$PYTHON" -m btdos --version'))
+        self.assertLess(source.index('"$PYTHON" -m btdos --version'), source.index('软件安装完成'))
+
+    def test_fake_failure_controls_match_validation_commands(self):
+        for command, variable in (( '["-m", "pip", "check"]', "INSTALL_TEST_PIP_CHECK_FAIL"),
+                                  ('["-m", "btdos", "--version"]', "INSTALL_TEST_CLI_FAIL")):
+            self.assertIn("args == " + command, FAKE_COMMAND)
+            self.assertIn(variable, FAKE_COMMAND)
 
 
 if __name__ == "__main__":

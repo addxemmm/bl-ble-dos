@@ -1,6 +1,7 @@
 """Guided Rich UI. Discovery is explicit; editing never starts a workload."""
 from dataclasses import dataclass, field
 from collections import Counter
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -19,16 +20,18 @@ from rich.text import Text
 from rich.theme import Theme
 
 from . import __version__
-from .config import CASES, MAC, Plan, budget_defaults
+from .config import CASES, MAC, Plan, TEST_SERVICE_UUID, TEST_WRITE_UUID, WRITE_BUDGET, budget_defaults
 from .discovery import safe_display_name, scan_devices
 from .doctor import command, diagnose
-from .supervisor import create_demo, run_plan
-from .terminal import Prompt
+from .evidence import verify_bundle
+from .supervisor import create_demo, run_plan, runtime_wall_budget, TARGET_READY_TIMEOUT
+from .terminal import Prompt, ReadyInput, ready_tty
 
 console = Console(highlight=False, theme=Theme({"accent": "bright_cyan", "muted": "dim", "good": "green", "warn": "yellow"}))
 STEPS = ("环境", "用例与适配器", "选择目标", "测试参数", "证据配置", "复核运行")
-PHASES = ("VALIDATE", "CAPTURE_START", "BASELINE", "RUN", "RECOVERY", "CAPTURE_STOP", "FINALIZE")
-PHASE_LABELS = dict(zip(PHASES, ("检查计划", "启动采集", "基线观察", "执行用例", "恢复观察", "停止采集", "封存报告")))
+PHASES = ("VALIDATE", "CAPTURE_START", "WAIT_TARGET_READY", "BASELINE", "RUN", "RECOVERY", "CAPTURE_STOP", "FINALIZE")
+PHASE_LABELS = dict(zip(PHASES, ("检查计划", "启动采集", "等待目标唤醒", "基线观察", "执行用例", "恢复观察", "停止采集", "封存报告")))
+RETRY = object()
 
 
 class Back(Exception):
@@ -65,6 +68,8 @@ class WizardDraft:
         capture="hci", nrf_port=None, output_root="runs",
         external_business_probe=False, external_ecu_observation=False,
     ))
+    service_uuid: str | None = None
+    write_test_confirmed: bool = False
 
     def to_plan(self):
         if self.target is None:
@@ -73,7 +78,8 @@ class WizardDraft:
             raise ValueError("先为当前目标选择或手动确认SDP服务，不能沿用其他目标的服务")
         plan = Plan(case=self.case, adapter=self.adapter, target=self.target.address,
                     local_address=self.local_address if self.case.startswith("br-") else None,
-                    characteristic=self.characteristic if self.case == "ble-read" else None,
+                    characteristic=self.characteristic if self.case in ("ble-read", "ble-write-command") else None,
+                    service_uuid=self.service_uuid, write_test_confirmed=self.write_test_confirmed,
                     sdp_uuid16=self.sdp_uuid16 if self.sdp_uuid16 is not None else 0x110B, **self.settings)
         plan.validate()
         return plan
@@ -224,7 +230,7 @@ def show_scan_result(result):
     for warning in result.warnings:
         console.print(Text(clean(warning, 240), style="yellow"))
     console.print(render_device_table(result.devices, page_size=max(1, len(result.devices))))
-    console.print("[dim]只展示本窗口观察；发现不是车端身份或传输承载证明，不自动连接或测试。[/dim]")
+    console.print("[dim]只展示本窗口观察；发现不是目标身份或传输承载证明，不自动连接或测试。[/dim]")
 
 
 def pick_target(transport, adapter, current=None):
@@ -264,7 +270,7 @@ def pick_target(transport, adapter, current=None):
         pages = max(1, math.ceil(len(visible)/8))
         page = min(page, pages-1)
         console.print(render_device_table(snapshot, query, page))
-        console.print(Text(f"{transport.upper()}扫描期间观察；承载与车端身份待核实。页 {page+1}/{pages}", style="dim"))
+        console.print(Text(f"{transport.upper()}扫描期间观察；承载与目标身份待核实。页 {page+1}/{pages}", style="dim"))
         console.print("编号选择 · r重扫 · f筛选 · t时长 · m手动 · n/p翻页 · b返回选择方式 · q取消")
         try:
             options = [(str(i+1), f"{clean(d.display_name or '未命名', 35)}  {d.address}")
@@ -328,22 +334,32 @@ def review_panel(plan, target_info=None):
     table.add_row("完整目标", Text(plan.target, style="bold"))
     if target_info:
         table.add_row("发现来源", Text(f"{clean(target_info.display_name)} · {target_info.source}"))
-    if plan.case in ("br-sdp", "ble-read"):
-        table.add_row("负载预算", f"{plan.rate:g} req/s · {plan.duration:g}s · ≤{plan.max_ops}次；批准上限 {plan.approved_rate:g}")
+    if plan.case in ("br-sdp", "ble-read", "ble-write-command"):
+        unit = "cmd/s" if plan.case == "ble-write-command" else "req/s"
+        table.add_row("负载预算", f"{plan.rate:g} {unit} · {plan.duration:g}s · ≤{plan.max_ops}次；批准上限 {plan.approved_rate:g}")
     else:
         table.add_row("循环预算", f"{plan.cycles}轮 · 保持 {plan.hold:g}s · 间隔 {plan.gap:g}s")
     if plan.case == "ble-read":
         table.add_row("只读特征", Text(plan.characteristic))
+    if plan.case == "ble-write-command":
+        table.add_row("写入模式", Text("非只读：固定测试fixture，BTDS+uint32序号，8字节/次", no_wrap=False, overflow="fold"))
+        table.add_row("确认边界", Text("无响应不等于目标确认；同链路探针不代表全设备DoS", no_wrap=False, overflow="fold"))
+        table.add_row("固定服务", Text(plan.service_uuid))
+        table.add_row("固定写特征", Text(plan.characteristic))
+        table.add_row("连接态探针", Text(f"基线{plan.baseline:g}s / 负载≤{plan.duration:g}s / 恢复{plan.recovery:g}s；1Hz、超时1s、工程慢阈值250ms", no_wrap=False, overflow="fold"))
+        table.add_row("停止本档", Text("连续慢2次或读取失败即停止写入，继续恢复观察；探针仅反映同链路通信SLA", no_wrap=False, overflow="fold"))
+    if plan.ble_interval_ms is not None:
+        table.add_row("连接参数", f"请求间隔 {plan.ble_interval_ms:g}ms；并非实际协商结果")
     if plan.case == "br-sdp":
         table.add_row("服务 UUID", f"0x{plan.sdp_uuid16:04X}")
-    table.add_row("观察窗口", f"基线 {plan.baseline:g}s / 恢复 {plan.recovery:g}s / 墙钟预算 {plan.wall_budget}s")
+    table.add_row("外层采集观察" if plan.case == "ble-write-command" else "观察窗口", f"基线 {plan.baseline:g}s / 恢复 {plan.recovery:g}s / 墙钟预算 {plan.wall_budget}s")
     table.add_row("抓包", Text("HCI + nRF BLE空口 / " + plan.nrf_port if plan.capture == "hci+nrf" else "单 dongle HCI（无独立空口）"))
-    table.add_row("外部证据", f"业务 {'已声明' if plan.external_business_probe else '未提供'} / ECU {'已声明' if plan.external_ecu_observation else '未提供'}")
+    table.add_row("外部证据", f"业务 {'已声明' if plan.external_business_probe else '未提供'} / 系统 {'已声明' if plan.external_ecu_observation else '未提供'}")
     table.add_row("保存位置", Text(clean(plan.output_root, 180)))
     return Panel(table, title="PLAN / 最终计划", border_style="cyan", padding=(1, 2))
 
 
-def dashboard(phase, path, elapsed, plan):
+def dashboard(phase, path, elapsed, plan, *, wait_for_target=False):
     content = Table.grid(expand=True, padding=(0, 1))
     content.add_column()
     content.add_row(Text(PHASE_LABELS.get(phase, phase), style="bold bright_cyan"))
@@ -354,32 +370,92 @@ def dashboard(phase, path, elapsed, plan):
                           style="bold cyan" if i == active else "green" if i < active else "dim")
     content.add_row(phase_line)
     content.add_row(Text(f"{CASES[plan.case][0]} · {plan.adapter} · {plan.target}"))
-    budget = f"{plan.rate:g} req/s · {plan.duration:g}s · ≤{plan.max_ops}次" if plan.case in ("br-sdp", "ble-read") else f"{plan.cycles}轮 · 保持{plan.hold:g}s / 间隔{plan.gap:g}s"
+    unit = "cmd/s" if plan.case == "ble-write-command" else "req/s"
+    budget = f"{plan.rate:g} {unit} · {plan.duration:g}s · ≤{plan.max_ops}次" if plan.case in ("br-sdp", "ble-read", "ble-write-command") else f"{plan.cycles}轮 · 保持{plan.hold:g}s / 间隔{plan.gap:g}s"
     content.add_row(Text(budget + "   /   " + plan.capture))
-    content.add_row(ProgressBar(total=plan.wall_budget, completed=min(elapsed, plan.wall_budget), complete_style="cyan", finished_style="green"))
-    content.add_row(Text(f"墙钟预算用时 {elapsed:.1f}/{plan.wall_budget}s（不是完成率/ETA） · Ctrl+C停止", style="dim"))
+    wall_budget = runtime_wall_budget(plan, ready_enabled=wait_for_target)
+    content.add_row(ProgressBar(total=wall_budget, completed=min(elapsed, wall_budget), complete_style="cyan", finished_style="green"))
+    content.add_row(Text(f"墙钟预算用时 {elapsed:.1f}/{wall_budget:g}s（不是完成率/ETA） · Ctrl+C停止", style="dim"))
+    if phase == "WAIT_TARGET_READY":
+        content.add_row(Text(f"请唤醒目标 {plan.target}；最多 {TARGET_READY_TIMEOUT:g}s。\n"
+                            "Enter / r 后回车确认已准备 · q 后回车取消 · Ctrl+C停止\n"
+                            "确认仅表示操作员准备完成，不是连接或建链证明；不会自动扫描、连接或保活。",
+                            style="bold yellow"))
     content.add_row(Text(str(path), style="dim", overflow="fold"))
     return Panel(content, title="SESSION / 实时状态", border_style="cyan", padding=(1, 2))
 
 
-def execute(plan):
+def _retry_available(path, status):
+    """Offer a new reviewed run only after verified, explicitly clean evidence."""
+    if status not in ("failed", "worker_failed", "target_not_ready"):
+        return False
+    path = Path(path)
+    try:
+        if (not (path / "manifest.json").is_file()
+                or any(path.glob("UNSEALED*"))):
+            return False
+        metadata = json.loads((path / "result.json").read_text(encoding="utf-8"))
+        if (not isinstance(metadata, dict) or metadata.get("status") != status
+                or metadata.get("worker_forced") is not False
+                or metadata.get("cleanup_errors") != []
+                or metadata.get("cleanup_confirmed", True) is not True):
+            return False
+        captures = metadata.get("captures")
+        if not isinstance(captures, list):
+            return False
+        if not captures and not (metadata.get("worker_started") is False
+                                 and metadata.get("cleanup_confirmed") is True):
+            return False
+        if any(not isinstance(item, dict) or item.get("forced") is not False
+               or item.get("cleanup_confirmed") is not True
+               or str(item.get("status", "")).startswith("cleanup_") for item in captures):
+            return False
+        return verify_bundle(path).get("ok") is True
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+
+def execute(plan, *, wait_for_target=False, allow_retry=False):
     banner()
-    if console.is_terminal:
-        with Live(dashboard("PREPARE", "待创建", 0, plan), console=console, refresh_per_second=5) as live:
-            path, status = run_plan(plan, lambda phase, path, elapsed: live.update(dashboard(phase, path, elapsed, plan)))
-    else:
-        seen = set()
+    waiting = wait_for_target and ready_tty(console)
+    # The default CLI path does not construct an input adapter or pass a poller.
+    with ReadyInput() if waiting else nullcontext() as readiness:
+        seen, live = set(), None
+
         def update(phase, path, elapsed):
-            if phase not in seen:
+            if readiness is not None and phase == "WAIT_TARGET_READY":
+                readiness.start()  # Flush old input before making the prompt visible.
+            if live is not None:
+                live.update(dashboard(phase, path, elapsed, plan, wait_for_target=waiting), refresh=True)
+            elif phase not in seen:
                 console.print(Text(f"{phase:14} {elapsed:6.1f}s  {path}"))
                 seen.add(phase)
-        path, status = run_plan(plan, update)
+
+        def run():
+            if readiness is not None:
+                return run_plan(plan, update, ready_poll=readiness.poll)
+            return run_plan(plan, update)
+
+        if console.is_terminal:
+            with Live(dashboard("PREPARE", "待创建", 0, plan, wait_for_target=waiting),
+                      console=console, refresh_per_second=5) as live:
+                path, status = run()
+        else:
+            path, status = run()
     sealed = (path / "manifest.json").is_file()
     text = Text(f"运行状态  {status}\n", style="bold green" if status == "completed" else "bold yellow")
     text.append(f"证据目录  {path}\n报告      {path / 'report.md'}\n")
     text.append("已封存；可使用 verify 复核完整性。" if sealed else "未封存/部分记录，请保留目录并检查 UNSEALED 标记。", style="green" if sealed else "yellow")
-    text.append("\n执行完成不等于车辆合规PASS。", style="dim")
+    text.append("\n执行完成不等于目标业务可用性验证通过。", style="dim")
     console.print(Panel(text, border_style="green" if status == "completed" else "yellow", title="EVIDENCE / 运行结果"))
+    if allow_retry and ready_tty(console) and _retry_available(path, status):
+        console.print("[dim]旧证据已保留；返回复核不会自动重发，新运行将创建独立证据目录。[/dim]")
+        try:
+            choice = ask_choice("失败后的操作", [("r", "保留计划返回复核页"), ("q", "结束本次向导")], default="q")
+        except (Back, Cancel, EOFError):
+            choice = "q"
+        if choice == "r":
+            return RETRY
     return 0 if status == "completed" else 130 if status == "interrupted" else 1
 
 
@@ -409,7 +485,7 @@ def _environment(info):
 
 def _case_adapter(draft, info):
     table = Table("#", "传输", "用例", "侧重点", box=box.SIMPLE_HEAVY, expand=True)
-    hints = ("服务发现处理", "动态通道释放，非ACL循环", "非控制性短只读特征", "串行连接回收，非槽位耗尽")
+    hints = ("服务发现处理", "动态通道释放，非ACL循环", "非控制性短只读特征", "串行连接回收，非槽位耗尽", "非只读：仅固定测试fixture，8字节写命令")
     for i, ((name, details), hint) in enumerate(zip(CASES.items(), hints), 1):
         table.add_row(str(i), details[1], details[0]+" "+details[2], hint)
     console.print(table)
@@ -425,6 +501,15 @@ def _case_adapter(draft, info):
                           for i, item in enumerate(devices, 1)]
     selected = devices[int(ask_choice("选择发起测试的USB控制器", controller_options, str(default)))-1]
     changed = selected["adapter"] != draft.adapter or CASES[case][1] != CASES[draft.case][1]
+    if case != draft.case:
+        if "ble-write-command" in (case, draft.case):
+            draft.characteristic = None
+            draft.settings.update(budget_defaults())
+            if case == "ble-write-command":
+                draft.settings.update(WRITE_BUDGET)
+            draft.preset = "default"
+        draft.service_uuid = None
+        draft.write_test_confirmed = False
     if changed:
         if draft.target:
             console.print("[yellow]适配器或传输已改变，旧目标与特征已清除，请重新核对。[/yellow]")
@@ -432,11 +517,14 @@ def _case_adapter(draft, info):
         draft.characteristic = None
         draft.sdp_uuid16 = None
         draft.probe_result = None
+        draft.service_uuid = None
+        draft.write_test_confirmed = False
     draft.case, draft.adapter, draft.local_address = case, selected["adapter"], selected.get("address")
     if case.startswith("br-") and not draft.local_address:
         raise ValueError("控制器地址尚未核实，请返回环境页刷新BlueZ状态")
     if case.startswith("br-"):
         draft.settings.update(capture="hci", nrf_port=None)
+        draft.settings.pop("ble_interval_ms", None)
 
 
 def probe_device(*args, **kwargs):
@@ -456,7 +544,7 @@ def target_panel(target, adapter):
     rows.add_row("已配对", "是" if target.paired else "否" if target.paired is not None else "未知")
     if target.known_services:
         rows.add_row("BlueZ已知UUID提示", Text("\n".join(clean(value) for value in target.known_services[:20])))
-    rows.add_row("状态", "以上为发现元数据，不证明车端身份、当前承载或完整服务清单。")
+    rows.add_row("状态", "以上为发现元数据，不证明目标身份、当前承载或完整服务清单。")
     return Panel(rows, title="DEVICE / 已选设备", border_style="cyan")
 
 
@@ -537,6 +625,21 @@ def _manual_service(draft):
 def _service_parameters(draft):
     """Explicit service discovery, then select metadata; never read values here."""
     console.print(target_panel(draft.target, draft.adapter))
+    if draft.case == "ble-write-command":
+        draft.write_test_confirmed = False
+        draft.service_uuid = None
+        draft.characteristic = None
+        console.print(Panel(Text("此场景已离开只读模式，仅用于专用测试fixture。\n"
+            f"固定服务：{TEST_SERVICE_UUID}\n固定写特征：{TEST_WRITE_UUID}\n"
+            "fixture特征须同时具有read和write-without-response属性，用于探针/末值回读及写命令。\n"
+            "固定BTDS+uint32序号，共8字节/次；不允许业务、Generic Access、DFU或其他特征。\n"
+            "无响应写返回只表示本地提交，不证明目标接收；同链路探针不代表全设备DoS。"),
+            title="专用fixture写入确认", border_style="yellow"))
+        if not ask_yes("确认当前目标为上述专用测试fixture，并接受非只读写入？", default=False):
+            raise Back()
+        draft.service_uuid, draft.characteristic = TEST_SERVICE_UUID, TEST_WRITE_UUID
+        draft.write_test_confirmed = True
+        return
     needs_service = draft.case in ("br-sdp", "ble-read")
     while True:
         result = draft.probe_result if _probe_matches(draft) else None
@@ -601,10 +704,29 @@ def _service_parameters(draft):
 
 def _parameters(draft):
     _service_parameters(draft)
-    console.print(Panel("1  默认计划  ·  1req/s / 10s，5轮，基线5s / 恢复10s\n2  快速预检  ·  1req/s / 5s，3轮，基线2s / 恢复5s\n3  自定义    ·  保留现有值，逐项校验；不扩大工具上限", border_style="blue", title="预算预设"))
+    if draft.case == "ble-write-command":
+        console.print(Panel("1  写入默认计划 · 100cmd/s / 10s / ≤1000次，固定8字节，总载荷≤8000字节\n"
+            "2  快速预检 · 1cmd/s / 5s / ≤5次\n3  自定义 · 最高100cmd/s / 10s / 1000次", title="专用fixture预算"))
+        preset = ask_choice("选择写入测试预算", [("1", "写入默认计划"), ("2", "快速预检"), ("3", "自定义")],
+                            default={"default": "1", "quick": "2", "custom": "3"}[draft.preset])
+        draft.preset = {"1": "default", "2": "quick", "3": "custom"}[preset]
+        if preset != "3":
+            draft.settings.update(budget_defaults(quick=preset == "2"))
+            if preset == "1":
+                draft.settings.update(WRITE_BUDGET)
+            return
+        settings = draft.settings
+        settings["approved_rate"] = ask_number("批准写入上限 cmd/s", settings["approved_rate"], 0.1, 100)
+        settings["rate"] = ask_number("本次写入率 cmd/s", min(settings["rate"], settings["approved_rate"]), 0.1, min(100, settings["approved_rate"]))
+        settings["duration"] = ask_number("写入窗口秒", settings["duration"], 1, 10)
+        settings["max_ops"] = ask_number("最大写命令数", settings["max_ops"], 1, 1000, integer=True)
+        settings["baseline"] = ask_number("基线观察秒", settings["baseline"], 0, 60)
+        settings["recovery"] = ask_number("恢复观察秒", settings["recovery"], 0, 120)
+        return
+    console.print(Panel("1  默认计划  ·  10req/s / 10s / ≤100次，5轮，基线5s / 恢复10s\n2  快速预检  ·  1req/s / 5s / ≤5次，3轮，基线2s / 恢复5s\n3  自定义    ·  保留现有值，逐项校验；不扩大工具上限", border_style="blue", title="预算预设"))
     console.print("[dim]请求用例使用请求率/窗口；循环用例使用轮数/保持/间隔，不同时叠加。[/dim]")
     default = {"default": "1", "quick": "2", "custom": "3"}[draft.preset]
-    preset = ask_choice("选择测试预算", [("1", "默认低负载 · 请求1次/秒、10秒 / 循环5轮"),
+    preset = ask_choice("选择测试预算", [("1", "默认计划 · 请求10次/秒、10秒、最多100次 / 循环5轮"),
                         ("2", "快速预检 · 请求1次/秒、5秒 / 循环3轮"),
                         ("3", "自定义 · 逐项调整并校验")], default=default)
     draft.preset = {"1": "default", "2": "quick", "3": "custom"}[preset]
@@ -645,7 +767,7 @@ def _evidence(draft, info):
     else:
         draft.settings["nrf_port"] = None
     draft.settings["external_business_probe"] = ask_yes("另有独立业务探针并留存结果？", draft.settings["external_business_probe"])
-    draft.settings["external_ecu_observation"] = ask_yes("另有ECU/车辆状态日志？", draft.settings["external_ecu_observation"])
+    draft.settings["external_ecu_observation"] = ask_yes("另有目标系统状态日志？", draft.settings["external_ecu_observation"])
     def output_valid(value):
         if not value or "\x00" in value:
             raise ValueError("填写有效目录，默认runs；真实证据不提交Git")
@@ -688,9 +810,11 @@ def run_wizard(info=None, draft=None):
                 draft.target = pick_target("bredr" if draft.case.startswith("br-") else "le", draft.adapter, draft.target)
                 if old_address != draft.target.address:
                     draft.characteristic = None
+                    draft.service_uuid = None
+                    draft.write_test_confirmed = False
                     draft.sdp_uuid16 = None
                     draft.probe_result = None
-                    if draft.case in ("br-sdp", "ble-read"):
+                    if draft.case in ("br-sdp", "ble-read", "ble-write-command"):
                         review_after_edit = False
                         console.print("[dim]目标已改变，下一步重新确认该目标的服务或只读特征。[/dim]")
             elif index == 3:
@@ -710,13 +834,17 @@ def run_wizard(info=None, draft=None):
                 if action in ("1", "2", "3", "4"):
                     index, review_after_edit = int(action), True
                     continue
-                console.print("[yellow]核对静止隔离台架、非控制性负载、独立停止措施和批准预算。发现候选不证明车端身份。[/yellow]")
+                console.print("[yellow]核对隔离测试环境、目标状态、独立停止措施和批准预算。发现候选不证明目标身份。[/yellow]")
                 confirmation = ask_text("输入完整目标MAC确认（其他输入取消本次启动）", default="CANCEL", history=False)
                 if confirmation.upper() != plan.target.upper():
                     console.print("[yellow]未确认，保持计划并返回复核页；没有启动负载。[/yellow]")
                     continue
                 if _ensure_capture_permission():
-                    return execute(plan)
+                    result = execute(plan, wait_for_target=True, allow_retry=True)
+                    if result is RETRY:
+                        index = 5
+                        continue
+                    return result
                 continue
             index = 5 if review_after_edit else index+1
         except Back:

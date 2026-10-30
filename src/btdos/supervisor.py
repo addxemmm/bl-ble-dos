@@ -12,9 +12,21 @@ import time
 
 from .capture import build_captures
 from .config import Plan
-from .doctor import diagnose, inspect_plan_adapter
+from .doctor import adapters, diagnose, inspect_plan_adapter
 from .evidence import EvidenceBundle, write_json, utc
+from .link import serve_parameter_requests
 from . import __version__
+
+TARGET_READY_TIMEOUT = 60.0
+
+
+def runtime_wall_budget(plan, ready_enabled=False):
+    """Interaction is runtime-only; old serialized plans retain their budgets."""
+    return plan.wall_budget + (TARGET_READY_TIMEOUT if ready_enabled else 0)
+
+
+class TargetNotReady(TimeoutError):
+    """Operator preparation timed out; no workload was started."""
 
 
 @contextmanager
@@ -57,6 +69,7 @@ def stop_worker(proc):
 def worker_statistics(path):
     counts = {}
     last = None
+    last_connection = None
     if not Path(path).exists():
         return dict(events=counts, last_worker_event=None)
     with Path(path).open(encoding="utf-8", errors="replace") as handle:
@@ -68,7 +81,10 @@ def worker_statistics(path):
             kind = event.get("event", "unknown")
             counts[kind] = counts.get(kind, 0) + 1
             last = event
+            if kind in ("br_connect_attempt", "br_connect_succeeded", "br_connect_failed"):
+                last_connection = event
     return dict(events=counts, last_worker_event=last,
+                last_connection_event=last_connection,
                 note="API/worker事件，非经目标关联核实的空口PDU数")
 
 
@@ -89,15 +105,17 @@ def export_index(folder):
         return dict(status="export_failed", error=str(exc), target_verification="manual_required")
 
 
-def run_plan(plan, on_update=None):
+def run_plan(plan, on_update=None, *, ready_poll=None):
     plan.validate()
+    if ready_poll is not None and not callable(ready_poll):
+        raise ValueError("ready_poll must be a non-blocking callable or None")
     if sys.platform != "linux":
         raise RuntimeError("实时运行需要 Linux；Windows 可开发、doctor、demo、report、verify")
     with adapter_lock(plan.adapter):
-        return _run_locked(plan, on_update)
+        return _run_locked(plan, on_update, ready_poll=ready_poll)
 
 
-def _run_locked(plan, on_update=None):
+def _run_locked(plan, on_update=None, *, ready_poll=None):
     bundle = EvidenceBundle(Path(plan.output_root), plan.to_dict())
     captures, results = [], []
     worker = None
@@ -107,6 +125,12 @@ def _run_locked(plan, on_update=None):
     stop_path = bundle.path / "STOP"
     forced = False
     last_heartbeat = 0
+    parameter_request_state = {}
+    effective_wall_budget = runtime_wall_budget(plan, ready_poll is not None)
+    ready = dict(enabled=ready_poll is not None,
+                 timeout_s=TARGET_READY_TIMEOUT if ready_poll is not None else 0,
+                 status="pending" if ready_poll is not None else "disabled", elapsed_s=0.0,
+                 confirmation="manual_not_connectivity_proof")
 
     def state(value):
         nonlocal phase
@@ -120,7 +144,7 @@ def _run_locked(plan, on_update=None):
         if stop_path.exists():
             raise InterruptedError("STOP 文件请求停止")
         now = time.monotonic()
-        if now-started > plan.wall_budget:
+        if now-started > effective_wall_budget:
             raise TimeoutError("supervisor 总墙钟预算到期")
         if check_capture and any(not item.alive() for item in captures):
             raise RuntimeError("必选采集进程中途退出，停止负载")
@@ -139,12 +163,62 @@ def _run_locked(plan, on_update=None):
             guard()
             time.sleep(min(0.1, max(0, end-time.monotonic())))
 
+    def wait_for_target():
+        wait_started = time.monotonic()
+        deadline = wait_started + TARGET_READY_TIMEOUT
+        try:
+            # UI arms/flushes its input before displaying this phase. No stdin
+            # is read by the supervisor or the isolated worker.
+            state("WAIT_TARGET_READY")
+            bundle.emit("target_ready_wait", **ready)
+            while True:
+                guard()
+                now = time.monotonic()
+                if now >= deadline:
+                    ready["status"] = "timed_out"
+                    raise TargetNotReady("唤醒准备等待超时；未启动worker，目标连接能力未验证")
+                try:
+                    answer = ready_poll()
+                except EOFError:
+                    answer = "cancel"
+                # Preserve STOP/capture/wall-clock priority, even if a callback
+                # misbehaves or requests STOP in the same poll as confirmation.
+                guard()
+                if time.monotonic() >= deadline:
+                    ready["status"] = "timed_out"
+                    raise TargetNotReady("唤醒准备等待超时；未启动worker，目标连接能力未验证")
+                if answer == "ready":
+                    ready["status"] = "ready"
+                    return
+                if answer == "cancel":
+                    ready["status"] = "cancelled"
+                    raise InterruptedError("操作员取消唤醒准备；未启动worker")
+                if answer not in (None, "pending"):
+                    raise ValueError("invalid target readiness result")
+                time.sleep(min(0.1, max(0, deadline-time.monotonic())))
+        finally:
+            ready["elapsed_s"] = time.monotonic()-wait_started
+            if ready["status"] == "pending":
+                ready["status"] = "aborted"
+            bundle.emit("target_ready_result", **ready)
+
     try:
         state("VALIDATE")
-        info = inspect_plan_adapter(plan)
-        write_json(bundle.path / "environment.json", diagnose())
+        sampled_at = utc()
+        preparation_started = time.monotonic()
+        controllers = adapters()
+        info = inspect_plan_adapter(plan, controllers=controllers)
+        environment = diagnose(controllers=controllers)
+        environment["adapter_snapshot_at"] = sampled_at
+        environment["preparation_elapsed_s"] = time.monotonic()-preparation_started
+        write_json(bundle.path / "environment.json", environment)
+        bundle.emit("preparation_complete", adapter_snapshot_at=sampled_at,
+                    elapsed_s=environment["preparation_elapsed_s"],
+                    runtime_wall_budget_s=effective_wall_budget)
         bundle.emit("adapter_bound", **info)
-        captures = build_captures(plan, bundle.path)
+        # Keep the original call path for non-interactive CLI/API callers.
+        captures = (build_captures(plan, bundle.path, wall_budget=effective_wall_budget)
+                    if ready_poll is not None else build_captures(plan, bundle.path))
         state("CAPTURE_START")
         for capture in captures:
             guard(check_capture=False)
@@ -153,6 +227,8 @@ def _run_locked(plan, on_update=None):
             bundle.emit("capture_initialized", name=capture.name,
                         note="有效文件头不等于目标包已捕获")
         guard()
+        if ready_poll is not None:
+            wait_for_target()
         state("BASELINE")
         observe(plan.baseline)
         state("RUN")
@@ -163,15 +239,31 @@ def _run_locked(plan, on_update=None):
         worker = subprocess.Popen(argv, stdout=worker_handle, stderr=subprocess.STDOUT,
                                   stdin=subprocess.DEVNULL, start_new_session=True)
         worker_started = time.monotonic()
+        def worker_guard():
+            guard()
+            if worker.poll() is not None:
+                raise RuntimeError("worker exited during parameter request")
+            if time.monotonic()-worker_started > plan.worker_budget:
+                raise TimeoutError("worker 预算到期")
+
         while worker.poll() is None:
+            # A normal worker may exit after the loop condition. Recheck its
+            # liveness only while serving an actual parameter RPC, not here.
             guard()
             if time.monotonic()-worker_started > plan.worker_budget:
                 raise TimeoutError("worker 预算到期")
+            serve_parameter_requests(plan, bundle.path, parameter_request_state, worker_guard)
             time.sleep(0.1)
         bundle.emit("worker_finished", returncode=worker.returncode)
         status = "completed" if worker.returncode == 0 else "needs_continuation" if worker.returncode == 2 else "worker_failed"
+        if status == "worker_failed":
+            last = worker_statistics(bundle.path / "worker.jsonl")["last_worker_event"] or {}
+            error = str(last.get("error") or last.get("detail") or
+                        f"worker退出码{worker.returncode}；详细原因见worker记录")
         state("RECOVERY")
         observe(plan.recovery)
+    except TargetNotReady as exc:
+        status, error = "target_not_ready", str(exc)
     except (KeyboardInterrupt, InterruptedError) as exc:
         status, error = "interrupted", str(exc) or "SIGINT"
     except Exception as exc:
@@ -218,6 +310,9 @@ def _run_locked(plan, on_update=None):
             bundle.emit("packet_index", **export)
             extra = dict(error=error, captures=list(reversed(results)),
                 worker_forced=forced, cleanup_errors=cleanup_errors,
+                worker_started=worker is not None,
+                cleanup_confirmed=not unconfirmed and not cleanup_errors,
+                runtime_wall_budget_s=effective_wall_budget, target_ready=ready,
                 worker_statistics=worker_statistics(bundle.path / "worker.jsonl"),
                 packet_verification="manual_required", packet_index=export)
             if unconfirmed:

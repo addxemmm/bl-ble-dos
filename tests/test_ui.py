@@ -265,6 +265,9 @@ class UiTests(unittest.TestCase):
             self.assertEqual(ui.run_wizard(self.info, draft), 0)
         self.assertEqual(draft.target.address, TARGET_A)
         self.assertEqual(draft.settings["duration"], 5)
+        self.assertEqual(draft.settings["rate"], 1)
+        self.assertEqual(draft.settings["approved_rate"], 1)
+        self.assertEqual(draft.settings["max_ops"], 5)
         self.assertEqual(draft.preset, "quick")
         self.execute.assert_not_called()
 
@@ -282,9 +285,56 @@ class UiTests(unittest.TestCase):
         with self.prompts(self.br_to_review() + ["r", TARGET_A]):
             self.assertEqual(ui.run_wizard(self.info), 0)
         self.assertEqual([call[0] for call in order.mock_calls], ["permission", "execute"])
+        self.assertEqual(self.execute.call_args.kwargs, {"wait_for_target": True, "allow_retry": True})
         plan = self.execute.call_args.args[0]
         self.assertEqual(plan.target, TARGET_A)
         self.assertEqual(plan.adapter, "hci0")
+        self.assertEqual((plan.rate, plan.approved_rate, plan.duration, plan.max_ops),
+                         (10, 10, 10, 100))
+
+    def test_retry_preserves_draft_but_requires_fresh_run_mac_and_permission(self):
+        draft = ui.WizardDraft()
+        self.execute.side_effect = [ui.RETRY, 0]
+        order = Mock()
+        order.attach_mock(self.permission, "permission")
+        order.attach_mock(self.execute, "execute")
+        script = self.br_to_review() + ["r", TARGET_A, "r", "WRONG", "r", TARGET_A]
+        with self.prompts(script) as observed:
+            self.assertEqual(ui.run_wizard(self.info, draft), 0)
+        self.assertEqual([call[0] for call in order.mock_calls],
+                         ["permission", "execute", "permission", "execute"])
+        self.assertEqual(self.execute.call_count, 2)
+        first, second = [call.args[0] for call in self.execute.call_args_list]
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertIsNot(first, second)
+        self.assertEqual(draft.target.address, TARGET_A)
+        self.assertEqual(draft.sdp_uuid16, 0x110B)
+        confirms = [label for label, _ in observed if label.startswith("输入完整目标MAC确认")]
+        self.assertEqual(len(confirms), 3)
+        self.probe.assert_not_called()
+        self.scan.assert_not_called()
+
+    def test_retry_then_quit_never_launches_second_run(self):
+        self.execute.return_value = ui.RETRY
+        with self.prompts(self.br_to_review() + ["r", TARGET_A, "q"]):
+            self.assertEqual(ui.run_wizard(self.info), 0)
+        self.execute.assert_called_once()
+        self.permission.assert_called_once()
+
+    def test_default_preset_restores_stronger_budget_after_quick(self):
+        draft = ui.WizardDraft(case="ble-cycle")
+        with patch.object(ui, "_service_parameters"), self.prompts(["2", "1"]):
+            ui._parameters(draft)
+            self.assertEqual((draft.settings["rate"], draft.settings["approved_rate"],
+                              draft.settings["duration"], draft.settings["max_ops"]), (1, 1, 5, 5))
+            ui._parameters(draft)
+        self.assertEqual((draft.settings["rate"], draft.settings["approved_rate"],
+                          draft.settings["duration"], draft.settings["max_ops"]), (10, 10, 10, 100))
+        self.assertEqual(draft.preset, "default")
+        self.assertIn("≤100次", self.output.getvalue())
+        self.scan.assert_not_called()
+        self.probe.assert_not_called()
+        self.execute.assert_not_called()
 
     def test_changed_adapter_or_transport_clears_old_target(self):
         for case_choice, controller in (("3", "2"), ("1", "1")):

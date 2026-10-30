@@ -9,11 +9,15 @@ CASES = {
     "br-channel": ("BR-02", "BR/EDR", "L2CAP 通道资源回收"),
     "ble-read": ("LE-01", "BLE", "GATT 只读请求负载"),
     "ble-cycle": ("LE-02", "BLE", "LE 连接生命周期"),
+    "ble-write-command": ("LE-03", "BLE", "专用fixture无响应写入负载"),
 }
+TEST_SERVICE_UUID = "9fbb0001-6284-4e2e-9c8e-3b7a2d546f10"
+TEST_WRITE_UUID = "9fbb0002-6284-4e2e-9c8e-3b7a2d546f10"
+WRITE_BUDGET = dict(rate=100.0, approved_rate=100.0, duration=10.0, max_ops=1000)
 MAC = re.compile(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\Z")
-DEFAULT_BUDGET = dict(rate=1.0, approved_rate=1.0, duration=10.0, max_ops=10,
+DEFAULT_BUDGET = dict(rate=10.0, approved_rate=10.0, duration=10.0, max_ops=100,
                       cycles=5, hold=2.0, gap=3.0, baseline=5.0, recovery=10.0)
-QUICK_BUDGET = dict(DEFAULT_BUDGET, duration=5.0, max_ops=5, cycles=3,
+QUICK_BUDGET = dict(DEFAULT_BUDGET, rate=1.0, approved_rate=1.0, duration=5.0, max_ops=5, cycles=3,
                     baseline=2.0, recovery=5.0)
 
 
@@ -45,6 +49,9 @@ class Plan:
     external_business_probe: bool = False
     external_ecu_observation: bool = False
     schema_version: int = 1
+    service_uuid: str | None = None
+    write_test_confirmed: bool = False
+    ble_interval_ms: float | None = None
 
     @classmethod
     def from_dict(cls, value):
@@ -84,10 +91,28 @@ class Plan:
                 self.characteristic,
             ):
                 raise ValueError("characteristic 需要完整 UUID 或 0xHANDLE")
+        if type(self.write_test_confirmed) is not bool:
+            raise ValueError("write_test_confirmed 必须是布尔值")
+        if self.case == "ble-write-command":
+            if (self.service_uuid != TEST_SERVICE_UUID or self.characteristic != TEST_WRITE_UUID
+                    or self.write_test_confirmed is not True):
+                raise ValueError("写入场景仅允许固定测试fixture service/characteristic并需显式确认")
+        elif self.service_uuid is not None or self.write_test_confirmed:
+            raise ValueError("service_uuid/write_test_confirmed 仅适用于 ble-write-command")
+        if self.ble_interval_ms is not None:
+            value = self.ble_interval_ms
+            try:
+                valid = (type(value) in (float, int) and math.isfinite(value)
+                         and 7.5 <= value <= 50 and (value / 1.25).is_integer())
+            except OverflowError:
+                valid = False
+            if not self.case.startswith("ble-") or not valid:
+                raise ValueError("ble_interval_ms 仅适用于BLE：7.5..50ms，且为1.25ms倍数")
         for name in ("sdp_uuid16", "max_ops", "cycles"):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"{name} 必须是整数")
-        if not 0 <= self.sdp_uuid16 <= 65535 or not 1 <= self.max_ops <= 400 or not 1 <= self.cycles <= 10:
+        max_ops_cap = 1000 if self.case == "ble-write-command" else 400
+        if not 0 <= self.sdp_uuid16 <= 65535 or not 1 <= self.max_ops <= max_ops_cap or not 1 <= self.cycles <= 10:
             raise ValueError("UUID16/max_ops/cycles 超出范围")
         for name in ("rate", "approved_rate", "duration", "hold", "gap", "baseline", "recovery"):
             value = getattr(self, name)
@@ -97,10 +122,12 @@ class Plan:
                 finite = False
             if not finite:
                 raise ValueError(f"{name} 需要有限数值")
-        if not 0.1 <= self.rate <= min(20, self.approved_rate):
-            raise ValueError("rate 需在 0.1..min(20,approved_rate) requests/s 内")
-        if not 1 <= self.duration <= 60 or not 1 <= self.hold <= 5 or not 3 <= self.gap <= 30:
-            raise ValueError("duration 1..60s；hold 1..5s；gap 3..30s")
+        rate_cap = 100 if self.case == "ble-write-command" else 20
+        duration_cap = 10 if self.case == "ble-write-command" else 60
+        if not 0.1 <= self.rate <= min(rate_cap, self.approved_rate):
+            raise ValueError(f"rate 需在 0.1..min({rate_cap},approved_rate) operations/s 内")
+        if not 1 <= self.duration <= duration_cap or not 1 <= self.hold <= 5 or not 3 <= self.gap <= 30:
+            raise ValueError(f"duration 1..{duration_cap}s；hold 1..5s；gap 3..30s")
         if not 0 <= self.baseline <= 60 or not 0 <= self.recovery <= 120:
             raise ValueError("baseline 0..60s；recovery 0..120s")
         if self.capture not in ("hci", "hci+nrf"):
@@ -118,11 +145,14 @@ class Plan:
 
     @property
     def worker_budget(self):
+        interval_budget = 20 if self.ble_interval_ms is not None and self.case.startswith("ble-") else 0
         if self.case == "ble-cycle":
-            return self.cycles * (10 + 10 + self.hold + 5 + self.gap) + 10
+            return self.cycles * (10 + 10 + self.hold + 5 + self.gap + interval_budget) + 10
         if self.case == "br-channel":
             return self.cycles * (3 + self.hold + self.gap) + 10
-        return self.duration + (35 if self.case == "ble-read" else 10)
+        if self.case == "ble-write-command":
+            return self.duration + self.baseline + self.recovery + 35 + interval_budget
+        return self.duration + (35 if self.case == "ble-read" else 10) + interval_budget
 
     @property
     def wall_budget(self):

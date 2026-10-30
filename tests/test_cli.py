@@ -121,6 +121,21 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse((self.root / "runs").exists())
 
+    def test_run_plan_without_budget_fields_uses_current_defaults(self):
+        plan = self.root / "defaults.json"
+        plan.write_text(json.dumps({
+            "case": "br-sdp", "adapter": "hci0", "target": "02:00:00:00:00:01",
+            "local_address": "02:00:00:00:00:02",
+        }), encoding="utf-8")
+        with patch("btdos.ui.execute", return_value=0) as execute:
+            result = app_cli.main(["run", "--plan", str(plan), "--confirm", "02:00:00:00:00:01"])
+        self.assertEqual(result, 0)
+        execute.assert_called_once()
+        selected = execute.call_args.args[0]
+        self.assertEqual((selected.rate, selected.approved_rate, selected.duration, selected.max_ops),
+                         (10, 10, 10, 100))
+        self.assertEqual(list(self.root.iterdir()), [plan])
+
     def test_missing_bundle_verify_is_structured_failure(self):
         result = self.cli("verify", self.root / "missing")
         self.assertEqual(result.returncode, 1)

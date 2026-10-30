@@ -1,6 +1,8 @@
 """Offline validation tests: invalid plans never reach a radio backend."""
 
+import json
 import math
+from pathlib import Path
 import unittest
 
 from btdos.config import Plan, budget_defaults
@@ -25,10 +27,10 @@ class PlanTests(unittest.TestCase):
 
     def test_default_limits_are_bounded(self):
         values = Plan.from_dict(valid_plan()).to_dict()
-        self.assertEqual(values["rate"], 1)
-        self.assertEqual(values["approved_rate"], 1)
+        self.assertEqual(values["rate"], 10)
+        self.assertEqual(values["approved_rate"], 10)
         self.assertEqual(values["duration"], 10)
-        self.assertEqual(values["max_ops"], 10)
+        self.assertEqual(values["max_ops"], 100)
         self.assertEqual(values["cycles"], 5)
         self.assertEqual(values["hold"], 2)
         self.assertEqual(values["gap"], 3)
@@ -58,12 +60,16 @@ class PlanTests(unittest.TestCase):
     def test_budget_defaults_are_independent_copies_and_quick_is_five_operations(self):
         default = budget_defaults()
         quick = budget_defaults(quick=True)
-        self.assertEqual(default["max_ops"], 10)
+        self.assertEqual(default["rate"], 10)
+        self.assertEqual(default["approved_rate"], 10)
+        self.assertEqual(default["max_ops"], 100)
+        self.assertEqual(quick["rate"], 1)
+        self.assertEqual(quick["approved_rate"], 1)
         self.assertEqual(quick["max_ops"], 5)
         self.assertEqual(quick["duration"], 5)
         default["max_ops"] = 400
         quick["duration"] = 60
-        self.assertEqual(budget_defaults()["max_ops"], 10)
+        self.assertEqual(budget_defaults()["max_ops"], 100)
         self.assertEqual(budget_defaults(quick=True)["duration"], 5)
 
     def test_existing_explicit_400_operation_plan_remains_supported(self):
@@ -71,6 +77,21 @@ class PlanTests(unittest.TestCase):
         plan.validate()
         self.assertEqual(plan.max_ops, 400)
         self.assertEqual(Plan.from_dict(plan.to_dict()).max_ops, 400)
+
+    def test_existing_explicit_low_load_plan_is_not_silently_upgraded(self):
+        plan = Plan.from_dict(valid_plan(rate=1, approved_rate=1, duration=10, max_ops=10))
+        self.assertEqual((plan.rate, plan.approved_rate, plan.duration, plan.max_ops), (1, 1, 10, 10))
+        self.assertEqual(Plan.from_dict(plan.to_dict()).to_dict(), plan.to_dict())
+
+    def test_example_plans_match_current_default_budget(self):
+        examples = Path(__file__).resolve().parents[1] / "examples" / "plans"
+        plans = sorted(examples.glob("*.json"))
+        self.assertEqual(len(plans), 5)
+        for path in plans:
+            with self.subTest(plan=path.name):
+                values = json.loads(path.read_text(encoding="utf-8"))
+                for field, default in budget_defaults().items():
+                    self.assertEqual(values[field], default)
 
     def test_numeric_out_of_bounds(self):
         invalid = {
